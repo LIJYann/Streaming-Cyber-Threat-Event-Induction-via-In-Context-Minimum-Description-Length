@@ -1,0 +1,156 @@
+{
+  "type": "bundle",
+  "id": "bundle--00000000-0000-4000-8000-000000000000",
+  "spec_version": "2.1",
+  "objects": [
+    {
+      "type": "identity",
+      "id": "identity--00000000-0000-4000-8000-000000000010",
+      "name": "Example CERT",
+      "identity_class": "organization"
+    },
+    {
+      "type": "threat-actor",
+      "id": "threat-actor--00000000-0000-4000-8000-000000000101",
+      "name": "APT29",
+      "aliases": ["Cozy Bear", "NOBELIUM"],
+      "created": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "type": "threat-actor",
+      "id": "threat-actor--00000000-0000-4000-8000-000000000102",
+      "name": "LockBit_Gang",
+      "created": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "type": "campaign",
+      "id": "campaign--00000000-0000-4000-8000-000000000201",
+      "name": "campaign_nobelium_2026",
+      "first_seen": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "type": "campaign",
+      "id": "campaign--00000000-0000-4000-8000-000000000202",
+      "name": "campaign_lockbit_wave",
+      "first_seen": "2026-01-06T00:00:00.000Z"
+    },
+    {
+      "type": "incident",
+      "id": "incident--00000000-0000-4000-8000-000000000301",
+      "name": "incident_apt29_embassy_2026",
+      "created": "2026-01-02T14:00:00.000Z"
+    },
+    {
+      "type": "incident",
+      "id": "incident--00000000-0000-4000-8000-000000000302",
+      "name": "incident_apt29_powergrid_2026",
+      "created": "2026-01-05T11:00:00.000Z"
+    },
+    {
+      "type": "incident",
+      "id": "incident--00000000-0000-4000-8000-000000000303",
+      "name": "incident_lockbit_hospital_2026",
+      "created": "2026-01-06T16:00:00.000Z"
+    },
+    {
+      "type": "incident",
+      "id": "incident--00000000-0000-4000-8000-000000000304",
+      "name": "incident_lockbit_municipal_2026",
+      "created": "2026-01-07T12:00:00.000Z"
+    },
+    {
+      "type": "vulnerability",
+      "id": "vulnerability--00000000-0000-4000-8000-000000000401",
+      "name": "CVE-2025-1111",
+      "created": "2025-11-01T00:00:00.000Z"
+    },
+    {
+      "type": "vulnerability",
+      "id": "vulnerability--00000000-0000-4000-8000-000000000402",
+      "name": "CVE-2025-9999",
+      "created": "2025-12-01T00:00:00.000Z"
+    },
+    {
+      "type": "relationship",
+      "id": "relationship--00000000-0000-4000-8000-000000000501",
+      "relationship_type": "attributed-to",
+      "source_ref": "campaign--00000000-0000-4000-8000-000000000201",
+      "target_ref": "threat-actor--00000000-0000-4000-8000-000000000101",
+      "created": "2026-01-02T14:00:00.000Z"
+    },
+    {
+      "type": "relationship",
+      "id": "relationship--00000000-0000-4000-8000-000000000502",
+      "relationship_type": "attributed-to",
+      "source_ref": "campaign--00000000-0000-4000-8000-000000000202",
+      "target_ref": "threat-actor--00000000-0000-4000-8000-000000000102",
+      "created": "2026-01-06T16:00:00.000Z"
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000001",
+      "name": "Password hygiene best practices",
+      "description": "Guidance for setting up strong corporate passwords and MFA. No adversary activity observed.",
+      "published": "2026-01-01T10:00:00.000Z",
+      "object_refs": ["identity--00000000-0000-4000-8000-000000000010"],
+      "x_no_event": true
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000002",
+      "name": "APT29 targeted Ministry of Foreign Affairs",
+      "description": "Adversary abused CVE-2025-1111 to gain initial access to an embassy network.",
+      "published": "2026-01-02T14:00:00.000Z",
+      "object_refs": [
+        "incident--00000000-0000-4000-8000-000000000301",
+        "campaign--00000000-0000-4000-8000-000000000201",
+        "vulnerability--00000000-0000-4000-8000-000000000401"
+      ]
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000003",
+      "name": "Technical breakdown of the backdoor used in the Ministry breach",
+      "description": "Second vendor publishes reverse engineering notes for the same intrusion.",
+      "published": "2026-01-03T09:30:00.000Z",
+      "object_refs": [
+        "incident--00000000-0000-4000-8000-000000000301",
+        "vulnerability--00000000-0000-4000-8000-000000000401"
+      ]
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000004",
+      "name": "APT29 breached a power grid operator",
+      "description": "A separate intrusion under the same campaign leveraged a novel wiper and CVE-2025-9999.",
+      "published": "2026-01-05T11:00:00.000Z",
+      "object_refs": [
+        "incident--00000000-0000-4000-8000-000000000302",
+        "campaign--00000000-0000-4000-8000-000000000201",
+        "vulnerability--00000000-0000-4000-8000-000000000402"
+      ]
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000005",
+      "name": "LockBit 4.0 detected encrypting municipal health systems",
+      "description": "A previously unseen ransomware operation hit a hospital network.",
+      "published": "2026-01-06T16:00:00.000Z",
+      "object_refs": [
+        "incident--00000000-0000-4000-8000-000000000303",
+        "campaign--00000000-0000-4000-8000-000000000202"
+      ]
+    },
+    {
+      "type": "report",
+      "id": "report--00000000-0000-4000-8000-000000000006",
+      "name": "Second LockBit wave hits a municipal government",
+      "description": "A distinct incident attributed to the same operation.",
+      "published": "2026-01-07T12:00:00.000Z",
+      "object_refs": [
+        "incident--00000000-0000-4000-8000-000000000304",
+        "campaign--00000000-0000-4000-8000-000000000202"
+      ]
+    }
+  ]
+}
