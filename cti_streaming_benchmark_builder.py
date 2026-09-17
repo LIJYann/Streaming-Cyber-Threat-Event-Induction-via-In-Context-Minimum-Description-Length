@@ -93,6 +93,7 @@ class StreamingSample:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "id": sample_id(self.doc_id),
             "doc_id": self.doc_id,
             "publish_time": self.publish_time,
             "title": self.title,
@@ -131,6 +132,15 @@ def incident_fingerprint(text: str) -> str:
     """由标题派生**确定性**的事件锚点 id（同一标题 => 同一 incident）。"""
     digest = hashlib.sha1(normalize_text(text).encode("utf-8")).hexdigest()[:16]
     return f"title:{digest}"
+
+
+def sample_id(doc_id: str) -> str:
+    """对外发布的**不透明**样本 id。
+
+    原始 `doc_id` 带 `#s2` 这样的切片序号，等于直接暗示 `SAME_EVENT`；模型侧投影
+    必须换成不透明 id，靠 benchmark 里的 `id` 字段回连标签。
+    """
+    return hashlib.sha1(doc_id.encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- #
@@ -639,8 +649,10 @@ def load_misp_events(source: Any) -> List[CTIDocument]:
         else:
             raise ValueError(f"MISP event {event['uuid']} has no timestamp or date.")
 
-        tag_names = sorted({(t or {}).get("name", "") for t in tags if (t or {}).get("name")})
-        content = info if not tag_names else f"{info}\n\n[tags] {'; '.join(tag_names)}"
+        # 正文只保留标题本身。tag 列表会泄露 NO_EVENT 判定（NO_EVENT 的定义就是
+        # "没有任何 galaxy 归属标签"）；来源机构同样是强先验（实测某些发布方与其
+        # 事件是否有归属高度相关），会变成与任务无关的捷径，因此都不写入正文。
+        content = info
 
         documents.append(
             CTIDocument(
@@ -726,11 +738,157 @@ def _iter_misp_event_payloads(source: Any) -> List[Dict[str, Any]]:
     return [_extract_misp_event(record) for record in payload if isinstance(record, dict)]
 
 
-def _attribute_label(attribute: Dict[str, Any]) -> str:
-    value = str(attribute.get("value") or "")
-    if len(value) > 60:
-        value = value[:57] + "..."
-    return f"{attribute.get('type', '?')}:{value}"
+# 属性 -> 自然语言的归组表。目的: 正文要能被语言模型正常读，而不是一串死哈希。
+_INDICATOR_GROUPS: List[Tuple[str, Set[str]]] = [
+    (
+        "Payload delivery",
+        {
+            "filename", "attachment", "malware-sample", "malware-type", "mime-type",
+            "filename|md5", "filename|sha1", "filename|sha256", "named-pipe", "mutex",
+            "pattern-in-file", "pattern-in-memory", "botnet-config",
+        },
+    ),
+    (
+        "Sample hashes",
+        {
+            "md5", "sha1", "sha256", "sha512", "ssdeep", "imphash", "tlsh",
+            "authentihash", "sha3-256", "pehash", "vhash",
+        },
+    ),
+    (
+        "Network activity",
+        {
+            "domain", "hostname", "ip-src", "ip-dst", "ip-src|port", "ip-dst|port",
+            "url", "uri", "domain|ip", "asn", "email-src", "email-dst", "user-agent",
+            "ja3-fingerprint-md5", "http-method", "snort", "netflow",
+        },
+    ),
+    ("Vulnerability", {"vulnerability", "weakness", "cpe"}),
+    ("Detection", {"yara", "sigma", "suricata", "regexp", "stix2-pattern"}),
+    (
+        "Attribution",
+        {
+            "campaign-name", "threat-actor", "target-user", "target-email",
+            "target-org", "target-location", "target-machine",
+        },
+    ),
+]
+_PROSE_TYPES = {"comment", "text", "other"}
+_ATTRIBUTE_TYPE_LABELS = {
+    "md5": "MD5", "sha1": "SHA-1", "sha256": "SHA-256", "sha512": "SHA-512",
+    "ssdeep": "ssdeep", "imphash": "imphash", "tlsh": "TLSH",
+    "domain": "domains", "hostname": "hostnames", "ip-src": "source IPs",
+    "ip-dst": "destination IPs", "url": "URLs", "uri": "URIs", "link": "links",
+    "filename": "file names", "attachment": "attachments",
+    "malware-sample": "malware samples", "yara": "YARA rules",
+    "vulnerability": "CVEs", "email-src": "sender addresses", "asn": "ASNs",
+    "target-org": "targeted organisations", "target-location": "targeted locations",
+    "target-user": "targeted accounts", "campaign-name": "campaign names",
+}
+_YARA_RULE_RE = re.compile(r"rule\s+([A-Za-z0-9_]+)")
+
+
+def _pluralise(attribute_type: str, count: int) -> str:
+    label = _ATTRIBUTE_TYPE_LABELS.get(attribute_type, attribute_type)
+    if count == 1:
+        return label[:-1] if label.endswith("s") and " " not in label else f"1 {label}"
+    return f"{count} {label}"
+
+
+def _shorten(value: str, limit: int = 80) -> str:
+    value = value.strip().replace("\n", " ")
+    return value if len(value) <= limit else value[: limit - 3] + "..."
+
+
+def render_attribute_summary(
+    attributes: Sequence[Dict[str, Any]],
+    info: str,
+    org: Optional[str] = None,
+    max_examples: int = 3,
+    max_content_chars: int = 1500,
+) -> str:
+    """把一批 MISP 属性渲染成**可读的自然语言正文**。
+
+    为什么要这么做：直接把 `type:value` 拼起来会得到"死哈希墙"（几十条截断的
+    SHA-256 连成一串），语言模型在其上算不出有意义的条件概率，MDL 描述长度也就
+    失去了度量意义。这里改为按语义分组、给出人话计数与少量示例，并把
+    `comment` / `text` 这类**真正的自然语言**属性原样引用；YARA 规则只保留规则名，
+    不再倾倒规则体。
+
+    渲染模板对所有到达批次**完全一致**（不出现 initial / new / update 等字样），
+    因此正文本身不携带标签信息。
+    """
+    lines: List[str] = [info, ""]
+    if org:
+        lines.append(f"Reported by {org}.")
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    prose: List[str] = []
+    for attribute in attributes:
+        attribute_type = str(attribute.get("type") or "?")
+        if attribute_type in _PROSE_TYPES:
+            value = str(attribute.get("value") or "").strip()
+            if value:
+                prose.append(_shorten(value, 200))
+            continue
+        for group, types in _INDICATOR_GROUPS:
+            if attribute_type in types:
+                grouped.setdefault(group, []).append(attribute)
+                break
+        else:
+            grouped.setdefault("Other", []).append(attribute)
+
+    for group, _types in _INDICATOR_GROUPS + [("Other", set())]:
+        items = grouped.get(group)
+        if not items:
+            continue
+        counts: Dict[str, int] = {}
+        for attribute in items:
+            counts[str(attribute.get("type")) or "?"] = counts.get(
+                str(attribute.get("type")) or "?", 0
+            ) + 1
+        parts = [
+            _pluralise(attribute_type, count)
+            for attribute_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        if group == "Detection":
+            rules: List[str] = []
+            for attribute in items:
+                rules.extend(_YARA_RULE_RE.findall(str(attribute.get("value") or "")))
+            detail = ", ".join(rules[:4]) + (" …" if len(rules) > 4 else "")
+            lines.append(f"{group}: {', '.join(parts)}" + (f" — {detail}" if detail else ""))
+            continue
+        examples = [
+            _shorten(str(a.get("value") or ""))
+            for a in items
+            if a.get("type") not in {"md5", "sha1", "sha256", "sha512", "ssdeep", "imphash", "tlsh"}
+        ]
+        # 哈希类不给示例会让正文退化成 "11 SHA-1, 11 SHA-256" 这种电报体，
+        # 这里每类补 1 个示例值（不倾倒整表，因此仍是"可读"的）。
+        for hash_type in sorted({str(a.get("type")) for a in items} & {
+            "md5", "sha1", "sha256", "sha512", "ssdeep", "imphash", "tlsh"
+        }):
+            sample_value = next(
+                (
+                    str(a.get("value") or "")
+                    for a in items
+                    if str(a.get("type")) == hash_type
+                ),
+                "",
+            )
+            if sample_value:
+                examples.append(f"{hash_type} {_shorten(sample_value, 64)}")
+        shown = "; ".join(examples[:max_examples])
+        lines.append(f"{group}: {', '.join(parts)}" + (f" — e.g. {shown}" if shown else ""))
+
+    if prose:
+        quoted = "; ".join(f'"{text}"' for text in prose[:max_examples])
+        lines.append(f"Analyst notes: {quoted}")
+
+    content = "\n".join(lines).strip()
+    if len(content) > max_content_chars:
+        content = content[: max_content_chars - 3].rstrip() + "..."
+    return content
 
 
 def load_misp_event_slices(
@@ -807,16 +965,16 @@ def load_misp_event_slices(
             # 注意：正文里**不能**出现 "arrival slice k/n" 这类字样，否则标签
             # 会被文本直接泄露。所有切片统一用中性的"已发布属性"表述，模型只能
             # 依靠标题同一性、时间邻近与属性集合本身去判断是否同一事件。
-            shown = "; ".join(
-                _attribute_label(a) for a in batch[:max_attributes_in_content]
+            # 正文: 自然语言渲染，且**不写入任何 tag 或来源机构**。
+            # 写 tag 会直接泄露标签（NO_EVENT 的定义就是"没有 galaxy 归属标签"，
+            # `misp-galaxy:` 的出现与否是一个 100% 准确的判据）；来源机构是同类的
+            # 强先验捷径。两者都只保留在 ground-truth 侧。
+            content = render_attribute_summary(
+                batch,
+                info,
+                org=None,
+                max_content_chars=max_attributes_in_content * 120,
             )
-            content = f"{info}\n\n[attributes] {len(batch)} records"
-            if shown:
-                content += f": {shown}"
-            if tags:
-                content += "\n[tags] " + "; ".join(
-                    sorted({(t or {}).get("name", "") for t in tags if (t or {}).get("name")})
-                )
 
             documents.append(
                 CTIDocument(

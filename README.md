@@ -11,15 +11,49 @@ Length 在线事件归纳要评测的设定。标签不是对全量语料做一�
 ```bash
 python3 scripts/build_all.py fetch   # 联网抓原始 feed（写 data/raw/，已 gitignore）
 python3 scripts/build_all.py build   # 重建全部提交产物
+python3 scripts/build_all.py freeze  # 写入 data/FROZEN.sha256 指纹锁（数据已冻结）
 python3 scripts/build_all.py check   # 离线重算 + 逐字节比对已提交产物
 python3 scripts/build_all.py all     # 上面三步
 
-python3 -m pytest tests -q           # 51 passed
+python3 -m pytest tests -q           # 57 passed
 ```
 
 `check` 只依赖仓库里已提交的快照：它会重新标注每一个 `*_stream.jsonl` 并与已提交的
 `*_benchmark.jsonl` 逐字节比对，同时验证输出对 `PYTHONHASHSEED` 不敏感。任何口径
 改动（阈值、时间窗、锚点策略）都会让 check 失败，从而必须显式重建数据集。
+
+**数据已冻结**：`data/FROZEN.sha256` 记录全部提交产物的指纹，`check` 会校验它。
+
+## 模型输入 vs Ground Truth
+
+不要直接把 `*_benchmark.jsonl` 喂模型 —— 它含 `incident_id` / `actor_id` /
+`campaign_id` / `target_incident_id` / `ground_truth_label*`，等于给答案。模型侧用
+`data/model_input/*.jsonl`：
+
+```json
+{"id": "03f6c81d91e8db71", "publish_time": "2016-02-18T22:03:37",
+ "title": "OSINT APT28: A Window into Russia's Cyber Espionage Operations? ...",
+ "text": "...\n\nSample hashes: 11 SHA-1, 11 SHA-256 — e.g. sha1 f5b3e98...; ..."}
+```
+
+`id` 是不透明哈希（`#s2` 这类切片序号被刻意抹掉，否则直接暗示 `SAME_EVENT`），
+回连 `*_benchmark.jsonl` 的 `id` 字段取标签即可。
+
+## 泄露审计（已固化为回归测试）
+
+| 检查项 | 结果 |
+|--------|------|
+| 正文含 `misp-galaxy:` | 0 / 2082（修复前 826 条，且"不含该串 ⇒ NO_EVENT"准确率 100%） |
+| 正文含来源机构名 | 0 / 2082（修复前某些发布方的切片 100% 是 NO_EVENT） |
+| 元数据 token 单规则纯度 | 最强 0.66 = 多数类基线，无捷径 |
+| 十六进制实体 token 占比 | 中位数 0%、p95 0%（修复前是截断哈希墙，最长 5964 字符） |
+| `content` 长度 | 中位数 290 / p95 763 / 最大 1195 字符 |
+| 正文含示例值 / 分析师批注 | 91.3% / 32.9% |
+| YARA 规则体倾倒 | 0（只保留规则名） |
+| 合成流首报 vs 平行报道 | 同构模板 + 随机发布方/事实顺序，无 "first/second report" 元陈述 |
+
+残留的类别相关性只有**数据固有一项**：`SAME` 切片正文更短（中位 166 vs `UNSEEN` 411），
+因为增量证据本来就少。建议论文里显式披露或做长度归一化对照。
 
 ## 四个评测资产
 

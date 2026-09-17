@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,25 @@ OFFLINE_PAIRS = [
     ("misp_sliced_stream.jsonl", "misp_sliced_benchmark.jsonl"),
     ("synthetic_stream_1000.jsonl", "synthetic_benchmark_1000.jsonl"),
 ]
+
+# 模型侧投影会剔除所有 ground-truth 字段，且**禁止**出现下列字符串（泄露判据）
+FORBIDDEN_IN_MODEL_INPUT = (
+    "misp-galaxy:",
+    "ground_truth_label",
+    "incident_id",
+    "actor_id",
+    "campaign_id",
+    "#s1",
+    "#s2",
+    "#s3",
+    "target_incident_id",
+)
+MODEL_INPUT_ASSETS = [
+    "misp_osint_benchmark.jsonl",
+    "misp_sliced_benchmark.jsonl",
+    "synthetic_benchmark_1000.jsonl",
+]
+FREEZE_LOCK = DATA / "FROZEN.sha256"
 
 
 def _labels(documents, **kwargs) -> List:
@@ -154,6 +174,13 @@ def check() -> int:
 
     # 标签分布不随哈希随机化漂移（回归: 曾因 set 迭代顺序漂移 48 条）
     ok &= _check_hash_seed_independence()
+    # 冻结指纹 + 模型侧投影的防泄露断言
+    ok &= verify_freeze()
+    try:
+        build_model_inputs()
+    except AssertionError as exc:
+        print(f"  [FAIL] 模型输入泄露检查: {exc}")
+        ok = False
     print("[check] 通过" if ok else "[check] 失败")
     return 0 if ok else 1
 
@@ -235,12 +262,95 @@ def build() -> int:
             f"NO={distribution['NO_EVENT']:5d} SAME={distribution['SAME_EVENT']:4d} "
             f"REL={distribution['RELATED_EVENT']:4d} UNSEEN={distribution['UNSEEN_EVENT']:4d}"
         )
+    build_model_inputs()
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# 模型侧投影: 只保留 publish_time / title / text，且断言无泄露
+# --------------------------------------------------------------------------- #
+def build_model_inputs() -> List[Path]:
+    """从 benchmark 派生模型输入（去掉全部 GT 字段与切片序号）。"""
+    out_dir = DATA / "model_input"
+    out_dir.mkdir(exist_ok=True)
+    written: List[Path] = []
+    for name in MODEL_INPUT_ASSETS:
+        source = DATA / name
+        if not source.exists():
+            continue
+        rows = []
+        for row in read_jsonl(source):
+            text = row["content"]
+            for token in FORBIDDEN_IN_MODEL_INPUT:
+                if token in text or token in (row.get("title") or ""):
+                    raise AssertionError(
+                        f"{name}: model input 出现禁止字符串 {token!r} -> 疑似标签泄露"
+                    )
+            rows.append(
+                {
+                    "id": row["id"],
+                    "publish_time": row["publish_time"],
+                    "title": row["title"],
+                    "text": text,
+                }
+            )
+        target = out_dir / name.replace("_benchmark", "_input")
+        with target.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        written.append(target)
+        print(f"[build] model_input  {target.name} ({len(rows)} rows)")
+    return written
+
+
+# --------------------------------------------------------------------------- #
+# 冻结: 写入/校验数据指纹锁
+# --------------------------------------------------------------------------- #
+def freeze() -> int:
+    files = sorted(
+        path
+        for path in list(DATA.glob("*.jsonl")) + list(DATA.glob("model_input/*.jsonl"))
+        if path.is_file()
+    )
+    lines = [
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(ROOT)}"
+        for path in files
+    ]
+    FREEZE_LOCK.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[freeze] 已写入 {FREEZE_LOCK.relative_to(ROOT)}（{len(files)} 个文件）")
+    return 0
+
+
+def verify_freeze() -> bool:
+    if not FREEZE_LOCK.exists():
+        print("  [warn] 未找到 FROZEN.sha256（先运行 build_all.py freeze）")
+        return True
+    expected = {}
+    for line in FREEZE_LOCK.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            digest, _, relative = line.partition("  ")
+            expected[relative.strip()] = digest
+    ok = True
+    for relative, digest in expected.items():
+        path = ROOT / relative
+        if not path.exists():
+            print(f"  [FAIL] {relative}: 冻结文件缺失")
+            ok = False
+        elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            print(f"  [FAIL] {relative}: 指纹与冻结记录不一致")
+            ok = False
+    if ok:
+        print(f"  [ok]   {len(expected)} 个冻结文件指纹一致")
+    return ok
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="One entry point for building/checking all datasets.")
-    parser.add_argument("command", choices=["fetch", "build", "check", "all"], help="要执行的事务")
+    parser.add_argument(
+        "command",
+        choices=["fetch", "build", "check", "freeze", "all"],
+        help="要执行的事务",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "fetch":
@@ -249,8 +359,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return build()
     if args.command == "check":
         return check()
+    if args.command == "freeze":
+        return freeze()
     status = fetch()
-    return status or build() or check()
+    return status or build() or freeze() or check()
 
 
 if __name__ == "__main__":

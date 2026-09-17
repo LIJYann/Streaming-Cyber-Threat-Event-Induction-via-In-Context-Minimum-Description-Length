@@ -409,7 +409,8 @@ def test_synthetic_is_deterministic():
 
 def test_synthetic_separates_distinct_events_from_parallel_reports():
     docs = generate_stream(150, seed=3)
-    first_reports = [d for d in docs if d.title and "First public reporting" in d.content]
+    # 首报持有 syn-incident-* 锚点，平行报道持有自己的 syn-report-* id
+    first_reports = [d for d in docs if (d.incident_id or "").startswith("syn-incident-")]
     tokens = [tokenize(d.title) for d in first_reports]
     for i, left in enumerate(tokens):
         for right in tokens[i + 1 :]:
@@ -516,3 +517,121 @@ def test_dumped_misp_stream_reproduces_committed_labels(tmp_path):
     )
     committed = read_jsonl(ROOT / "data" / "misp_osint_benchmark.jsonl")
     assert [s.to_dict() for s in regenerated] == committed
+
+
+# --------------------------------------------------------------------------- #
+# 防泄露 / 冻结
+# --------------------------------------------------------------------------- #
+FORBIDDEN_GT_TOKENS = (
+    "misp-galaxy:",
+    "ground_truth_label",
+    "incident_id",
+    "actor_id",
+    "campaign_id",
+    "target_incident_id",
+    "#s1",
+    "#s2",
+    "#s3",
+)
+
+
+def test_no_appendix_metadata_leaks_into_content():
+    """回归: 正文里出现 `misp-galaxy:` 曾使『无该串 ⇒ NO_EVENT』达到 100% 准确率。"""
+    for name in (
+        "misp_osint_benchmark.jsonl",
+        "misp_sliced_benchmark.jsonl",
+        "synthetic_benchmark_1000.jsonl",
+    ):
+        rows = read_jsonl(ROOT / "data" / name)
+        assert rows
+        for row in rows:
+            for token in FORBIDDEN_GT_TOKENS:
+                assert token not in row["content"], f"{name}: {token} 出现在正文"
+                assert token not in (row["title"] or ""), f"{name}: {token} 出现在标题"
+
+
+def test_no_event_is_not_textually_decidable():
+    """管道元数据不得成为标签判据。
+
+    回归: 正文里曾写有 `[tags] misp-galaxy:...`，于是"正文没有 misp-galaxy ⇒
+    NO_EVENT"这一条规则的准确率是 100%。这里对元数据类 token 做双向单规则审计
+    （出现 ⇒ 标签 / 不出现 ⇒ 标签），要求 n>=50 的规则纯度 < 0.95。
+    """
+    from collections import Counter
+
+    rows = read_jsonl(ROOT / "data" / "misp_sliced_benchmark.jsonl")
+    labels = [r["ground_truth_label_name"] for r in rows]
+    token_sets = [set(tokenize(r["title"])) | set(tokenize(r["content"])) for r in rows]
+    vocabulary = {
+        "misp", "galaxy", "tlp", "tag", "tags", "attr", "record", "records",
+        "slice", "arrival", "initial", "edition", "reported", "source",
+        "krawczyk", "circl", "cthulhusprl", "orgc", "uuid", "bundle",
+    }
+    all_indices = set(range(len(rows)))
+    for token in vocabulary:
+        present = {i for i, tokens in enumerate(token_sets) if token in tokens}
+        for name, subset in (("present", present), ("absent", all_indices - present)):
+            if len(subset) < 50:
+                continue
+            share = Counter(labels[i] for i in subset).most_common(1)[0][1] / len(subset)
+            assert share < 0.95, (
+                f"元数据 token {token!r} 在 {name} 方向上是标签判据: 纯度 {share:.2f}, n={len(subset)}"
+            )
+
+
+def test_synthetic_bodies_do_not_reveal_same_event():
+    """首报与平行报道的正文模板必须同构，不能靠元陈述区分。"""
+    rows = read_jsonl(ROOT / "data" / "synthetic_benchmark_1000.jsonl")
+    banned = ("second organisation", "first public reporting", "independently corroborates")
+    for row in rows:
+        lowered = row["content"].lower()
+        for phrase in banned:
+            assert phrase not in lowered
+
+
+def test_model_inputs_carry_no_ground_truth():
+    out_dir = ROOT / "data" / "model_input"
+    for name in ("misp_osint_input.jsonl", "misp_sliced_input.jsonl", "synthetic_input_1000.jsonl"):
+        path = out_dir / name
+        if not path.exists():
+            pytest.skip("model_input 未生成（先运行 scripts/build_all.py build）")
+        rows = read_jsonl(path)
+        assert rows
+        for row in rows:
+            assert set(row) == {"id", "publish_time", "title", "text"}
+            assert "#s" not in row["id"]
+            for token in FORBIDDEN_GT_TOKENS:
+                assert token not in row["text"]
+
+
+def test_model_input_ids_join_back_to_benchmark():
+    out_dir = ROOT / "data" / "model_input"
+    pairs = [
+        ("misp_osint_input.jsonl", "misp_osint_benchmark.jsonl"),
+        ("misp_sliced_input.jsonl", "misp_sliced_benchmark.jsonl"),
+        ("synthetic_input_1000.jsonl", "synthetic_benchmark_1000.jsonl"),
+    ]
+    for input_name, benchmark_name in pairs:
+        input_path = out_dir / input_name
+        if not input_path.exists():
+            pytest.skip("model_input 未生成")
+        inputs = read_jsonl(input_path)
+        benchmark = read_jsonl(ROOT / "data" / benchmark_name)
+        assert [r["id"] for r in inputs] == [r["id"] for r in benchmark]
+        assert [r["publish_time"] for r in inputs] == [r["publish_time"] for r in benchmark]
+
+
+def test_frozen_lockfile_matches_committed_data():
+    lock = ROOT / "data" / "FROZEN.sha256"
+    if not lock.exists():
+        pytest.skip("数据尚未冻结")
+    import hashlib
+
+    entries = [
+        line.partition("  ")[::2] for line in lock.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert entries
+    for digest, relative in entries:
+        path = ROOT / relative.strip()
+        assert path.exists(), f"{relative} 缺失"
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, f"{relative} 指纹不符"

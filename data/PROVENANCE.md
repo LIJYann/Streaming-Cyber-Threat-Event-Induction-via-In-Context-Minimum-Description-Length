@@ -6,8 +6,24 @@
 ```bash
 python3 scripts/build_all.py fetch   # 联网抓原始 feed 到 data/raw/（已 gitignore）
 python3 scripts/build_all.py build   # 重建全部提交产物
+python3 scripts/build_all.py freeze  # 写入 data/FROZEN.sha256 指纹锁
 python3 scripts/build_all.py check   # 离线重算并逐字节比对已提交产物
 ```
+
+**数据已冻结**：`data/FROZEN.sha256` 是唯一的指纹事实来源（本文件不再重复维护
+SHA-256 表格，避免两处不一致）。`check` 会同时校验指纹锁与重算结果。
+
+## 0. 模型侧投影（喂给模型的就是这个）
+
+| 文件 | 条数 | 内容 |
+|------|------|------|
+| `model_input/misp_osint_input.jsonl` | 1680 | `{id, publish_time, title, text}` |
+| `model_input/misp_sliced_input.jsonl` | 2082 | 同上 |
+| `model_input/synthetic_input_1000.jsonl` | 1000 | 同上 |
+
+投影只保留 `publish_time` / `title` / `text`，`id` 是不透明哈希（回连 `*_benchmark.jsonl`
+的 `id` 字段取标签）。所有 GT 字段（`incident_id` / `actor_id` / `campaign_id` /
+`target_incident_id` / `ground_truth_label*`）与切片序号都**不在**投影里。
 
 ## 1. 真实流 A：CIRCL MISP OSINT feed（事件级元数据）
 
@@ -22,10 +38,10 @@ python3 scripts/build_all.py check   # 离线重算并逐字节比对已提交�
 | 带 galaxy 标签的事件 | 655 |
 | 许可 | 公开 OSINT feed（事件带 `tlp:white` 类标签），仅使用事件级元数据 |
 
-| 文件 | 条数 | SHA-256 |
-|------|------|---------|
-| `misp_osint_stream.jsonl`（输入快照） | 1680 | `5b5dbe617995ff182768b1e866681af482fd2ad16c332e659caee9419074eed3` |
-| `misp_osint_benchmark.jsonl`（标签） | 1680 | `4c28f3166d723a554bbbc2315b44131e90cbf550dd9a4e373cf964d305f75228` |
+| 文件 | 条数 |
+|------|------|
+| `misp_osint_stream.jsonl`（输入快照） | 1680 |
+| `misp_osint_benchmark.jsonl`（标签） | 1680 |
 
 标签分布：`NO 1118 / SAME 3 / RELATED 221 / UNSEEN 338`，时间跨度 2014-10 → 2026-09。
 
@@ -53,14 +69,6 @@ python3 scripts/build_all.py check   # 离线重算并逐字节比对已提交�
 | 全部切片（wild） | 1370 | **151** | 223 | 338 |
 | 仅归属子集（augmented） | 0 | **151** | 223 | 338 |
 
-SHA-256：
-
-| 文件 | SHA-256 |
-|------|---------|
-| `misp_sliced_stream.jsonl` | `ef654542c29f5a45d3e8ac3748e33852009a0fd9d899c600ec8b0cf0ea27b7bd` |
-| `misp_sliced_benchmark.jsonl` | `8d9e3bdfba261fd9e74eaf5f07c9f6a1ae0784e1dddb8a0b2f6aa5fe1bad7e8c` |
-| `misp_sliced_attributed_benchmark.jsonl` | `8a7c8f1ef0bf6703d8ef7721edbde6f9546d1d4fb5f55b0ca3a4855e5bc94621` |
-
 > 原始完整事件不入库（875 MB 且 feed 每日更新）；提交的 `*_stream.jsonl` 快照已包含
 > 重建标签所需的全部字段。
 
@@ -73,10 +81,10 @@ SHA-256：
 | 模拟时间范围 | 2019-01-01 → 2020-10-09 |
 | 实体 | 250 个虚构 actor、750 个事件实例 |
 
-| 文件 | 条数 | SHA-256 |
-|------|------|---------|
-| `synthetic_stream_1000.jsonl` | 1000 | `a23ab6f18ea2613d8a2624234a1d029e5990e4a9cee06bb1e8539d00e42411b5` |
-| `synthetic_benchmark_1000.jsonl` | 1000 | `fda6442d1391ab1a4f6c8b7306607e6751b76f96c79cc8befe281ac5c707a844` |
+| 文件 | 条数 |
+|------|------|
+| `synthetic_stream_1000.jsonl` | 1000 |
+| `synthetic_benchmark_1000.jsonl` | 1000 |
 
 标签分布：`250 / 250 / 250 / 250`（与请求比例完全一致，生成器内部校验）。
 关闭相似度链接后同一条流变为 `250 / 0 / 500 / 250` —— `SAME_EVENT` 完全依赖平行报道
@@ -86,11 +94,28 @@ SHA-256：
 
 ## 4. 小样例（回归测试用）
 
-| 文件 | 条数 | SHA-256 | 说明 |
-|------|------|---------|------|
-| `demo_benchmark.jsonl` | 5 | `a722ddfdbd9cd63ad89b11b150b3fa838052de6f5c7c298aa5139898bda04ac7` | 手工演示流，四类齐全 |
-| `sample_stix_bundle.json` | — | `129e6eaa92341d6405b3fed3a87ab8421a8e2e7b4965d4fecf6c72122f602075` | 离线 STIX 2.1 样例 |
-| `sample_benchmark.jsonl` | 6 | `5f3278c10932e0510ce4a64a9242a1458e7f4a06f540d11fadee46b9f117d5fa` | 由上述 bundle 生成 |
+| 文件 | 条数 | 说明 |
+|------|------|------|
+| `demo_benchmark.jsonl` | 5 | 手工演示流，四类齐全 |
+| `sample_stix_bundle.json` | — | 离线 STIX 2.1 样例 |
+| `sample_benchmark.jsonl` | 6 | 由上述 bundle 生成 |
+
+## 5. 泄露审计（已固化进 `tests/test_streams.py` 与 `build_all.py check`）
+
+| 检查项 | 结果 |
+|--------|------|
+| 正文含 `misp-galaxy:` | 0 / 2082（修复前 826，且"不含该串 ⇒ NO_EVENT"准确率 100%） |
+| 正文含来源机构名 | 0 / 2082（修复前某些发布方的切片 100% 是 NO_EVENT，属强先验捷径） |
+| 正文含 GT 字段名 / `#sN` | 0 |
+| 元数据类 token 的单规则纯度 | 最强 0.66（= 多数类基线），无可用捷径 |
+| 十六进制实体 token 占比 | 中位数 0%、p95 0%（修复前正文是截断哈希墙，最长 5964 字符） |
+| `content` 长度 | 中位数 290、p95 763、最大 1195 字符 |
+| 正文含示例值 / 分析师批注 | 91.3% / 32.9% |
+| YARA 规则体倾倒 | 0（只保留规则名） |
+
+**残留（已知且属数据固有，非元数据泄露）**：`SAME` 切片的中位正文长度（166）明显
+小于 `UNSEEN`（411）—— 因为"增量证据"本来就更少。这是真实世界的固有相关性，建议在论文
+里显式披露，或作为长度归一化的对照实验。
 
 ## 可复现性
 

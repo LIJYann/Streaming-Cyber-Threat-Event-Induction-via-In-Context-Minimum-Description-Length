@@ -130,6 +130,11 @@ NOISE_TITLES = [
     "Overview of log retention requirements for regulated firms",
     "Walkthrough for onboarding a new endpoint agent",
 ]
+PUBLISHERS = [
+    "the regional CERT", "an independent threat research team", "a national CSIRT",
+    "a commercial intelligence vendor", "a sector information sharing centre",
+    "an incident response consultancy", "a university security lab",
+]
 NOISE_BODIES = [
     "General advice, no adversary activity or named campaign is described.",
     "Educational material for administrators; no indicators or victims are mentioned.",
@@ -197,8 +202,37 @@ def _paraphrase(title: str, rng: random.Random) -> str:
             break
     if rng.random() < 0.5 and " (" in swapped:
         head, _, tail = swapped.partition(" (")
-        swapped = f"{tail.rstrip(')')} {head}".capitalize()
+        # 把 CVE 提到前面时保留原大小写，避免出现 "Cve-2019-..." 这种畸形标题
+        swapped = f"{tail.rstrip(')')} — {head}"
     return swapped
+
+
+def _report_body(incident: Dict[str, object], rng: random.Random) -> str:
+    """首报与平行报道**共用**的正文生成器。
+
+    两条硬约束:
+      1. 结构必须同构: 不允许出现 "first / second / independently corroborates"
+         这类元陈述，否则正文本身就成了 100% 准确的标签判据。
+      2. 同一事件的多篇报道要**措辞不同**（随机选模板、随机选发布方、随机排列
+         事实顺序），否则 SAME 会退化成"两份文本逐字相同"，模型只需做拷贝检测，
+         而不是判断"这两段描述是不是同一起事件"。
+    """
+    sector = SECTORS[len(str(incident["incident_id"])) % len(SECTORS)]
+    publisher = rng.choice(PUBLISHERS)
+    facts = [
+        f"Attribution is to {incident['actor_id']} operating the {incident['campaign_id']} cluster.",
+        f"The entry vector is {incident['cve']}.",
+        f"The reported impact is {incident['data_point']} at {incident['victim']}.",
+        f"The affected environment is {sector}.",
+    ]
+    rng.shuffle(facts)
+    lead_ins = [
+        f"Reported by {publisher}.",
+        f"{publisher.capitalize()} published an assessment.",
+        f"An advisory from {publisher} describes this activity.",
+        f"Findings were shared by {publisher}.",
+    ]
+    return rng.choice(lead_ins) + " " + " ".join(facts)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,12 +346,9 @@ def generate_stream(
 
         first_report_tokens.append(incident["tokens"])  # type: ignore[arg-type]
         used_titles.add(str(incident["title"]))
-        body = (
-            f"{str(incident['title']).split(' (')[0]}. First public reporting on this "
-            f"intrusion. Analysts linked the activity to the {incident['campaign_id']} "
-            f"cluster and flagged {incident['cve']} as the initial access vector. "
-            f"Impact: {incident['data_point']} at {incident['victim']}."
-        )
+        # 首报与平行报道使用**同一套句式**（只有发布方与个别动词不同），
+        # 避免正文出现 "first/second report" 这类直接泄露 SAME 标签的元陈述。
+        body = _report_body(incident, rng)
         dated.append(
             (
                 clock,
@@ -339,12 +370,7 @@ def generate_stream(
         for _ in range(follow_ups_per_incident[unit]):
             delay = timedelta(hours=rng.randint(6, follow_up_window_hours))
             title = _paraphrase(str(incident["title"]), rng)
-            follow_up_body = (
-                f"A second organisation published its own analysis of the "
-                f"{incident['victim']} intrusion, corroborating the {incident['cve']} "
-                f"entry vector and the {incident['data_point']} impact figure. "
-                f"Independent attribution: {incident['actor_id']}."
-            )
+            follow_up_body = _report_body(incident, rng)
             dated.append(
                 (
                     clock + delay,
