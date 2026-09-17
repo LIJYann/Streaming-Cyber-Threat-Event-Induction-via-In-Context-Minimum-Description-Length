@@ -29,6 +29,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +49,13 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="manifest 输出路径")
     parser.add_argument("--with-events", type=int, default=0, help="额外下载的完整事件数")
     parser.add_argument("--timeout", type=int, default=60, help="单次请求超时（秒）")
+    parser.add_argument("--workers", type=int, default=12, help="并发下载线程数")
+    parser.add_argument(
+        "--spread",
+        action="store_true",
+        help="按时间轴均匀抽样而不是取最早的 N 个（推荐：覆盖不同年代的事件形态）",
+    )
+    parser.add_argument("--events-dir", type=Path, default=None, help="完整事件输出目录")
     args = parser.parse_args(argv)
 
     try:
@@ -85,18 +93,40 @@ def main(argv=None) -> int:
     if args.with_events:
         sample_dir = args.out.parent / "misp_events"
         sample_dir.mkdir(parents=True, exist_ok=True)
-        uuids = sorted(manifest)[: args.with_events]
-        for index, uuid in enumerate(uuids, start=1):
+        ordered = [u for u, _ in sorted(manifest.items(), key=lambda kv: (kv[1]["date"], kv[0]))]
+        if args.spread and args.with_events < len(ordered):
+            step = (len(ordered) - 1) / (args.with_events - 1) if args.with_events > 1 else 0
+            uuids = []
+            for index in range(args.with_events):
+                candidate = ordered[round(index * step)]
+                if candidate not in uuids:
+                    uuids.append(candidate)
+        else:
+            uuids = ordered[: args.with_events]
+
+        todo = [u for u in uuids if not (sample_dir / f"{u}.json").exists()]
+        print(f"[info] {len(uuids)} events selected, {len(todo)} to download", file=sys.stderr)
+        failures = 0
+
+        def download(uuid: str) -> str:
             target = sample_dir / f"{uuid}.json"
-            if target.exists():
-                continue
             try:
                 target.write_bytes(fetch(f"{FEED_BASE}{uuid}.json", args.timeout))
+                return ""
             except (urllib.error.URLError, TimeoutError) as exc:
-                print(f"[warn] {uuid}: {exc}", file=sys.stderr)
-            if index % 10 == 0:
-                print(f"  fetched {index}/{len(uuids)} full events", file=sys.stderr)
-        print(f"[ok] full event samples -> {sample_dir}")
+                return f"{uuid}: {exc}"
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for index, error in enumerate(pool.map(download, todo), start=1):
+                if error:
+                    failures += 1
+                    print(f"[warn] {error}", file=sys.stderr)
+                if index % 25 == 0:
+                    print(f"  fetched {index}/{len(todo)}", file=sys.stderr)
+        print(
+            f"[ok] full event samples -> {sample_dir} "
+            f"({len(todo) - failures} ok, {failures} failed)"
+        )
 
     return 0
 

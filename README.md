@@ -6,75 +6,95 @@
 等价于"它到达时，系统已知世界"下的判定 —— 这正是 In-Context Minimum Description
 Length 在线事件归纳要评测的设定。标签不是对全量语料做一次聚类的产物。
 
-## 数据集规模
-
-| 数据集 | 文档数 | 时间跨度 | 标签分布 (NO / SAME / REL / UNSEEN) | 用途 |
-|--------|--------|----------|--------------------------------------|------|
-| **真实流** `data/misp_osint_benchmark.jsonl` | **1680** | 2014-10 → 2026-09 | 1118 / 13 / 214 / 335 | CIRCL 公开 MISP OSINT feed，真实元数据与倾斜分布 |
-| **受控合成流** `data/synthetic_benchmark_1000.jsonl` | **1000** | 模拟 2019 → 2022 | 250 / 250 / 250 / 250 | 严格均衡，用于消融与类别层面指标 |
-| STIX 样例 `data/sample_benchmark.jsonl` | 6 | 2026-01 | 1 / 1 / 2 / 2 | 离线回归测试，含间接归属链路 |
-| 演示流 `data/demo_benchmark.jsonl` | 5 | 2026-01 | 1 / 1 / 1 / 2 | 状态机 smoke test |
-
-数据来源、SHA-256 指纹与复现命令见 [`data/PROVENANCE.md`](data/PROVENANCE.md)。
-
-## 快速开始
-
-纯标准库实现，Python >= 3.8，无需安装依赖（跑测试需要 `pytest`）。
+## 一键脚本（所有规则性事务都在这里）
 
 ```bash
-# 真实流：抓取 CIRCL MISP OSINT manifest 并构建 Benchmark（无需 API key）
-python3 scripts/fetch_misp_osint.py
-python3 cti_streaming_benchmark_builder.py --misp data/raw/misp_manifest.json \
-    --out data/misp_osint_benchmark.jsonl --dump-stream data/misp_osint_stream.jsonl --stats
+python3 scripts/build_all.py fetch   # 联网抓原始 feed（写 data/raw/，已 gitignore）
+python3 scripts/build_all.py build   # 重建全部提交产物
+python3 scripts/build_all.py check   # 离线重算 + 逐字节比对已提交产物
+python3 scripts/build_all.py all     # 上面三步
 
-# 或者直接用仓库里已生成的离线快照重建（不需要重新抓取）
-python3 cti_streaming_benchmark_builder.py --input data/misp_osint_stream.jsonl \
-    --out /tmp/misp_rebuilt.jsonl --stats
-
-# 受控合成流：规模与标签比例都可指定，结果可复现
-python3 synthetic_stream.py --n 1000 --seed 20260101 --mix 0.25,0.25,0.25,0.25 \
-    --out data/synthetic_stream_1000.jsonl
-python3 cti_streaming_benchmark_builder.py --input data/synthetic_stream_1000.jsonl \
-    --out data/synthetic_benchmark_1000.jsonl --stats
-
-# 离线 STIX 2.1 bundle
-python3 cti_streaming_benchmark_builder.py --stix data/sample_stix_bundle.json \
-    --out data/sample_benchmark.jsonl --stats
-
-# 消融：关闭平行报道链接
-python3 cti_streaming_benchmark_builder.py --input data/misp_osint_stream.jsonl \
-    --no-similarity-link --stats --quiet
-
-# 测试
-python3 -m pytest tests -q      # 39 passed
+python3 -m pytest tests -q           # 51 passed
 ```
+
+`check` 只依赖仓库里已提交的快照：它会重新标注每一个 `*_stream.jsonl` 并与已提交的
+`*_benchmark.jsonl` 逐字节比对，同时验证输出对 `PYTHONHASHSEED` 不敏感。任何口径
+改动（阈值、时间窗、锚点策略）都会让 check 失败，从而必须显式重建数据集。
+
+## 四个评测资产
+
+| 资产 | 文件 | 文档数 | 时间跨度 | NO / SAME / RELATED / UNSEEN |
+|------|------|--------|----------|------------------------------|
+| **Real-Wild** | `data/misp_osint_benchmark.jsonl` | 1680 | 2014-10 → 2026-09 | 1118 / 3 / 221 / 338 |
+| **Real-Augmented**（增量切片） | `data/misp_sliced_benchmark.jsonl` | 2082 | 2014-10 → 2026-09 | 1370 / **151** / 223 / 338 |
+| **Real-Augmented-Attributed** | `data/misp_sliced_attributed_benchmark.jsonl` | 712 | 2014-10 → 2026-08 | 0 / 151 / 223 / 338 |
+| **Controlled-Synthetic** | `data/synthetic_benchmark_1000.jsonl` | 1000 | 模拟 2019 → 2020 | 250 / 250 / 250 / 250 |
+
+外加两个回归用小样例：STIX 样例 6 篇、演示流 5 篇。
+来源 URL、SHA-256 与重建命令见 [`data/PROVENANCE.md`](data/PROVENANCE.md)。
+
+建议的呈现方式（两者互补，不要试图抹平差异）：
+
+* **Real-Wild** 就是开集压力测试：主看高噪声下的 `NO_EVENT` 拒识率（false alarm）
+  与 `UNSEEN` 的发现纯度；它只有 3 条 `SAME`，适合做 case study 而不是召回率结论。
+* **Real-Augmented / Synthetic** 用于细粒度消歧的统计显著性：报告 4-way Macro-F1
+  与动态混淆矩阵，重点看模型区分 `SAME` vs `RELATED` 的决策边界质量。
 
 ## 标签语义
 
 | 值 | 标签 | 含义 | 判定依据（只看向过去） |
 |----|------|------|------------------------|
 | 0 | `NO_EVENT` | 噪声，无事件级因果锚点 | 非威胁报告，或无 `incident` / `campaign` 锚点 |
-| 1 | `SAME_EVENT` | 已知事件的平行报道 / 增量更新 | 共享 `incident` 锚点，或标题 token Jaccard ≥ 0.8 的平行报道 |
-| 2 | `RELATED_EVENT` | 同一组织 / 战役下相关但独立的事件 | `incident` 全新，但 `campaign` 或 `actor` 已出现过 |
+| 1 | `SAME_EVENT` | **同一次攻击突破实例**的平行报道 / 增量证据 | 共享 `incident` 锚点（真实 Event ID / 标题指纹），或满足复合约束的平行报道链接 |
+| 2 | `RELATED_EVENT` | 同一组织/武器家族在不同时间对不同目标的**独立行动** | `incident` 全新，但 `campaign` 或 `actor` 已出现过 |
 | 3 | `UNSEEN_EVENT` | 首次出现的新组织 / 新战役全新事件 | `incident` / `campaign` / `actor` 全部未见过 |
 
 判定顺序是**优先级短路**的：`NO_EVENT` → `SAME_EVENT` → `RELATED_EVENT` → `UNSEEN_EVENT`。
 
-### 平行报道链接（`similarity_link`）
+## 策略决定：为什么 Locky 每日波次是 `RELATED` 而不是 `SAME`
 
-真实 feed 里"同一事件被多家机构分别报道"往往**不共享任何 id**，只靠元数据锚点会
-把这类文档判成 `UNSEEN_EVENT`。开启后额外做一次因果的标题相似度检索：新文档标题与
-**已到达**文档标题的 token Jaccard ≥ 阈值（默认 0.8）即判为 `SAME_EVENT`，目标锚点
-指向先到达的那篇。
+MISP 的协作机制天然带有去重与合并：同一事件有新进展时，分析员往**同一个 Event ID**
+追加 Attributes/Objects，而不是新建 Event。因此跨 Event ID 的"平行报道"在 MISP 上
+极度稀缺，而模板化的连续波次（如 2017 年 Locky 每日垃圾邮件）却很多。
 
-该选项**默认开启**，`--no-similarity-link` 可关闭用于消融。在合成流上的效果非常直接：
+把后者判成 `SAME` 属于概念混淆（受害者群体正交、基础设施与载荷每波轮换，是**同一
+家族的不同行动**）。因此平行报道链接采用**复合约束**，三条同时满足才允许：
 
-| 口径 | NO / SAME / RELATED / UNSEEN |
-|------|------------------------------|
-| 开启链接 | 250 / 250 / 250 / 250 |
-| 关闭链接 | 250 / **0** / 500 / 250 |
+1. `Jaccard(title) >= 0.7`（默认阈值）
+2. `|Δt| <= 14 天`（真实平行报道集中在爆发后 1~2 周内）
+3. **共享 CVE 或同一 actor**（弱实体证据）
 
-即合成流里的 `SAME_EVENT` 类**完全**来自平行报道链接。
+第 3 条是关键：Locky 波次之间既不共享 CVE 也没有共享 actor 标签，因此被正确挡在
+`SAME` 之外，落回 `RELATED`（同 campaign、不同事件实例）。
+
+| 口径 | Real-Wild 的 SAME 数 | 说明 |
+|------|----------------------|------|
+| 只有标题相似度（旧） | 13 | 主要来自 Locky 模板系列 → 概念污染 |
+| 复合约束（当前默认） | 3 | 剩下的是标题完全相同的重发 + 一条真实跨源平行报道 |
+| `--no-similarity-link` | 2 | 完全关闭链接的保守基线（只剩共享标题指纹的重发） |
+
+关闭链接后只剩"共享 incident 锚点（标题指纹完全相同）"的那部分；复合约束相对它只多出
+**1 条**真实跨源平行报道，说明启发式链接已被压到只保留高置信度案例。
+
+## 真实 `SAME_EVENT` 是怎么补齐的（抓手 A：属性到达切片）
+
+同一 feed 的 1680 个**完整事件**（含 `Attribute`）按属性到达批次切片：
+
+* 把"事件发布时刻 + 所有属性时间戳"排序，间隔 > `--session-gap-hours`（默认 12h）
+  切成不同批次；
+* 每批属性作为一条文档到达，切片共享真实 `misp-event:<uuid>` 锚点；
+* 首片 → `UNSEEN`/`RELATED`，后续片 → **`SAME_EVENT`**。
+
+这样得到 **151 条真实 `SAME_EVENT`**（是 Real-Wild 的 50 倍），而且标签由**真实 MISP
+Event ID** 支撑，不依赖任何文本启发式 —— 学术上没有可攻击的语义漏洞。
+
+两个刻意的设计细节：
+
+* **正文不泄露标签**：所有切片统一用中性的 `[attributes] N records: ...` 表述，
+  不出现 "slice / arrival / update" 等字样（有回归测试守着）。
+* **不可纯靠字符串匹配**：实测有 135 个标题同时对应多种标签 —— 例如另一家机构用
+  完全相同的标题发布了**不同** Event ID 的事件时，它不会被误判为 `SAME`（缺少
+  共享 actor/CVE 证据），而是 `UNSEEN`。
 
 ## 输入映射
 
@@ -88,98 +108,91 @@ python3 -m pytest tests -q      # 39 passed
 | `threat-actor` | `actor_id`（Related 判定锚点） |
 | `vulnerability` | `cves`（特征补充） |
 
-* **归属闭包遍历**：锚点从 `object_refs` 出发沿 `relationship` 做可达闭包，
-  `report -> campaign -> threat-actor` 这类间接归属（`attributed-to`）也能解析出来。
-* **只把 `report` 变成文档**：`incident` 是事件实例本身，只作锚点。
-* **`x_no_event: true`** 扩展用于显式注入 `NO_EVENT` 噪声稿。
-* **未挂 incident 的 report** 以自身 STIX id 作为事件实例锚点。
+锚点从 `object_refs` 出发沿 `relationship` 做可达闭包，因此
+`report -> campaign -> threat-actor` 这类间接归属（`attributed-to`）也能解析出来；
+`incident` 只作锚点不重复生成文档；`x_no_event: true` 用于显式注入噪声稿。
 
-### MISP（CIRCL OSINT feed）
+### MISP
 
 | MISP 字段 / 标签 | 映射到 |
 |------------------|--------|
 | `uuid` / `timestamp` / `date` | `doc_id` / `publish_time` |
-| `info` | `content` + `title`，并由标题指纹给出 `incident_id` |
+| `info` | `content` + `title`；manifest 流由标题指纹给出 `incident_id`，切片流用真实 Event ID |
 | `misp-galaxy:threat-actor=...`、`mitre-*-intrusion-set` 等 | `actor_id` |
 | `misp-galaxy:campaign` / `ransomware` / `malpedia` / `rat` 等 | `campaign_id` |
 | `misp-galaxy:threat-actor/malware/tool/...` 任一 | `is_threat_report=True` |
-| `CVE-....` 标签 | `cves`（本 feed 为空，保留通用性） |
+| `Attribute[].timestamp` | 切片边界（`--misp-events`） |
+| `Attribute[].value` 中的 CVE | `cves`（每个切片单独统计） |
 
-两类锚点集合定义在 `MISP_ACTOR_GALAXIES` / `MISP_CAMPAIGN_GALAXIES`，可按需扩展。
 一个事件若同时挂多个归属标签（如既标 `Sofacy` 又标 `STRONTIUM`），锚点取**文档 tag
-原序**中最先出现的那个 —— 这一点对结果可复现是必需的，见下文缺陷 4。
+原序**中最先出现的那个；这是结果可复现的必要条件，见下文缺陷 4。
 
 ## 输出
 
-JSON Lines，一篇文档一行，可直接作为流式回放评测集：
+JSON Lines，一篇文档一行：
 
 ```json
 {"doc_id": "report--...-0002", "publish_time": "2026-01-02T14:00:00",
- "title": "APT29 targeted Ministry of Foreign Affairs",
- "content": "...", "ground_truth_label": 3, "ground_truth_label_name": "UNSEEN_EVENT",
- "target_incident_id": "incident--...-0301", "rationale": "Novel incident with novel attribution (...)"}
+ "title": "APT29 targeted Ministry of Foreign Affairs", "content": "...",
+ "ground_truth_label": 3, "ground_truth_label_name": "UNSEEN_EVENT",
+ "target_incident_id": "misp-event:8f0c...", "rationale": "Novel incident with novel attribution (...)"}
 ```
 
 * `publish_time` 统一归一化为 naive UTC，排序即回放顺序。
 * `rationale` 记录判定理由，便于人工抽检标注质量。
-* `--dump-stream` 可同时导出**输入**文档流（含锚点与标题），使他人无需重新抓取原始
-  feed 即可复现同一条 Benchmark；`data/*_stream.jsonl` 就是这类快照。
+* `--dump-stream` 同时导出**输入**文档流（`*_stream.jsonl`），使他人无需重新抓取
+  feed 即可复现 Benchmark。注意这些快照含锚点字段，**模型输入只能用
+  `publish_time` / `title` / `content`**。
 
 ## 相对最初草稿的修正
 
-最初版本能跑通 5 篇演示，但在真实数据流上会出错。以下问题均已修复并加了回归测试：
+最初版本能跑通 5 篇演示，但在真实数据流上会出错。以下均已修复并有回归测试：
 
-1. **`None` 污染已知世界**：仅有 `campaign` 锚点（无 `incident`）的文档会走到 UNSEEN
-   分支并把 `None` 写进 `seen_incidents`，此后 `None in seen_incidents` 恒为真 ——
-   后续每一篇"无 incident 但有 campaign"的**全新**文档都被误判为 `SAME_EVENT`
-   （且 `target_incident_id` 为 `None`）。现在只登记非空锚点。
-2. **`RELATED` 分支不登记新锚点**：原逻辑只在 UNSEEN 分支更新记忆库，于是"已知
-   actor + 新 campaign"这类文档的新 campaign 永远进不了已知世界。现在所有非噪声
-   文档统一登记。
-3. **时区混排崩溃**：STIX 的 `Z`、MISP 的 unix 时间戳与手工构造的 naive datetime
-   混排排序会抛 `TypeError`。现在统一归一化为 naive UTC。
-4. **不可复现（重跑结果漂移）**：真实 feed 上有 48 条文档的标签在两次运行间不稳定。
-   根因是用 `frozenset` 迭代（受字符串哈希随机化影响）决定锚点与相似度候选：
-   多归属标签事件的 actor 会随机取到 `Sofacy` 或 `STRONTIUM`，相似度检索的候选
-   集合顺序也会漂移。现在锚点按 tag 原序取、候选按 `(频次, token)` 排序，
-   输出在 `PYTHONHASHSEED=1/2/3/99` 下字节一致。
-
-另外补上了显式括号（`not A or (B and C)` 的优先级靠 `and` 绑定，容易读错）、
-同时间戳的次级排序键、`--out/--dump-stream/--stats` 与标签覆盖自检。
+1. **`None` 污染已知世界**：仅有 `campaign` 锚点（无 `incident`）的文档会把 `None`
+   写进 `seen_incidents`，此后每一篇同类**全新**文档都被误判为 `SAME_EVENT`。
+   现在只登记非空锚点。
+2. **`RELATED` 分支不登记新锚点**：原逻辑只在 UNSEEN 分支更新记忆库，"已知 actor +
+   新 campaign"的新 campaign 永远进不了已知世界。现在所有非噪声文档统一登记。
+3. **时区混排崩溃**：STIX 的 `Z`、MISP 的 unix 时间戳与手工 naive datetime 混排排序
+   会抛 `TypeError`。现在统一归一化为 naive UTC。
+4. **不可复现（重跑漂移）**：真实 feed 上有 48 条文档的标签在两次运行间不稳定 ——
+   根因是用 `frozenset` 迭代（受字符串哈希随机化影响）决定锚点与相似度候选。
+   现在锚点按 tag 原序取、候选按 `(频次, token)` 排序，输出在
+   `PYTHONHASHSEED=1/2/3/99` 下字节一致。
+5. **切片边界错误**：只保留会话起点会让"属于上一批、时间戳晚于本批起点"的属性
+   落进下一批（并丢失该批 CVE）。现在按会话**区间**归批，并把事件发布时刻本身
+   作为第一个到达点。
 
 ## 已知局限
 
-* 标签是**元数据驱动的弱监督**：锚点质量决定标签质量；跨源 `incident` 未对齐时，
-  同一事件会被判成 `UNSEEN_EVENT`（这正是相似度链接要补的场景，但它只覆盖
-  标题高度重合的情况）。
-* 真实 OSINT feed 的 `SAME_EVENT` 天然稀疏（1680 篇里 13 篇）。这不是实现缺陷而是
-  数据属性：该 feed 的事件标题彼此区分度较高。需要均衡类别时请用合成流。
-* 该 feed 中被链接上的 `SAME_EVENT` 主要来自同模板的连续系列报道（例如 2017 年
-  Locky 每日垃圾邮件波次 `M2M - Locky 2017-10-02/04/05 ...`）。把它们当作"同一
-  事件的增量报道"还是"同一行动下的独立事件"是一个**标注策略**选择；若你倾向后者，
-  提高 `--jaccard` 或改用 `--no-similarity-link` 即可得到更保守的口径。
-* `NO_EVENT` 占比在真实流上约 67%，因为 feed 中大量条目是通用科普/工具介绍，
-  只挂着 `attack-pattern`、`country`、`sector` 这类"非事件锚点"标签。
-* `RELATED_EVENT` 的边界依赖 `campaign` / `actor` 的粒度一致性；把恶意软件家族
-  galaxy 当作战役聚类是本文档的显式策略，不是标准。
-* 判定目前只用身份锚点与标题相似度，不使用 CVE / TTP 相似度；`cves` 仅随样本导出。
+* 标签是**元数据驱动的弱监督**：锚点质量决定标签质量。跨源未对齐的 incident 需要
+  相似度链接才能识别，而链接只覆盖标题高度重合且共享弱实体证据的情况。
+* Real-Wild 的 `NO_EVENT` 占 67%：feed 中大量条目是通用科普/工具介绍，只挂
+  `attack-pattern`、`country`、`sector` 这类非事件锚点标签。
+* 若两家机构用**完全相同**的标题报道同一事件、但既没有共享 actor 也没有 CVE，
+  当前策略会判为 `UNSEEN`（保守），而不是 `SAME`；这是刻意的取舍 —— 见"策略决定"。
+* 切片流里 `SAME` 依赖"同一 Event ID 的后续属性到达"，因此天然偏向**多轮维护**的
+  事件；单轮发布的事件贡献不了 `SAME`。
+* 判定只用身份锚点、标题相似度与时间窗，不使用 TTP 相似度；`cves` 目前仅作为特征
+  随样本导出，尚未参与聚类。
 
 ## 目录结构
 
 ```
-├── cti_streaming_benchmark_builder.py   # 状态机 + STIX/MISP/JSON 摄取 + JSONL 导出 + CLI
+├── cti_streaming_benchmark_builder.py   # 状态机 + STIX/MISP/切片摄取 + JSONL 导出 + CLI
 ├── synthetic_stream.py                  # 受控合成流生成器（比例可控 + 自校验）
-├── scripts/fetch_misp_osint.py          # CIRCL MISP OSINT manifest 抓取（含指纹记录）
+├── scripts/
+│   ├── build_all.py                     # 单一入口: fetch / build / check
+│   └── fetch_misp_osint.py              # CIRCL MISP OSINT 抓取（manifest + 完整事件）
 ├── data/
 │   ├── PROVENANCE.md                    # 来源、SHA-256、复现命令
-│   ├── misp_osint_stream.jsonl          # 真实流输入快照（1680）
-│   ├── misp_osint_benchmark.jsonl       # 真实流标签（1680）
-│   ├── synthetic_stream_1000.jsonl      # 合成流输入（1000）
-│   ├── synthetic_benchmark_1000.jsonl   # 合成流标签（1000）
-│   ├── sample_stix_bundle.json          # 离线 STIX 2.1 样例（含间接归属）
-│   ├── sample_benchmark.jsonl           # 由样例 bundle 生成（6）
-│   └── demo_benchmark.jsonl             # 内置演示流（5）
+│   ├── misp_osint_{stream,benchmark}.jsonl              # Real-Wild (1680)
+│   ├── misp_sliced_{stream,benchmark}.jsonl             # Real-Augmented (2082)
+│   ├── misp_sliced_attributed_benchmark.jsonl           # 归属子集 (712)
+│   ├── synthetic_{stream_1000,benchmark_1000}.jsonl     # Controlled (1000)
+│   ├── sample_stix_bundle.json / sample_benchmark.jsonl # STIX 样例 (6)
+│   └── demo_benchmark.jsonl                             # 演示流 (5)
 └── tests/
     ├── test_builder.py                  # 状态机语义 + 回归 + STIX + JSONL
-    └── test_streams.py                  # MISP 摄取 + 相似度链接 + 合成流 + 数据契约
+    └── test_streams.py                  # MISP 摄取 + 切片 + 链接约束 + 合成流 + 数据契约
 ```

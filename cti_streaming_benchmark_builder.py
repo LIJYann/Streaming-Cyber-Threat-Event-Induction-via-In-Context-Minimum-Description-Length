@@ -38,7 +38,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -142,13 +142,27 @@ class CTIStreamingBenchmarkGenerator:
     状态 (`seen_*`) 就是"系统已知世界"，只由**已经到达**的文档更新。
 
     ``similarity_link=True`` 时额外启用平行报道链接：新文档标题若与**已到达**
-    文档的标题 token Jaccard >= ``jaccard_threshold``，则视为同一事件的平行报道
-    (`SAME_EVENT`)。该判定同样是因果的（只看向过去），用于补足真实数据里
-    "同一事件被多家机构分别报道、但元数据没有共享 incident id"的情况。
+    文档的标题高度重合，则视为同一事件的平行报道 (`SAME_EVENT`)。
+
+    链接使用**复合约束**（缺一不可），因为单纯看标题相似度会把"同一行动在不同
+    时间对正交目标发起的独立波次"误判成同一事件（例如 MISP feed 里 2017 年
+    Locky 每日垃圾邮件波次，标题模板相同但受害群体完全正交）：
+
+      1. ``Jaccard(title) >= jaccard_threshold``
+      2. ``|Δt| <= link_time_window_days``（真实平行报道集中在爆发后 1~2 周内）
+      3. 共享 CVE 或同一 actor（弱实体证据）
+
+    第 3 条正是把模板化连续波次挡在外面、只留下真正同一事件平行报道的关键：
+    Locky 波次之间既不共享 CVE 也没有共享 actor 标签，因此会落到
+    `RELATED_EVENT`（同一 campaign、不同事件实例），而不是 `SAME_EVENT`。
     """
 
     def __init__(
-        self, similarity_link: bool = False, jaccard_threshold: float = 0.8
+        self,
+        similarity_link: bool = True,
+        jaccard_threshold: float = 0.7,
+        link_time_window_days: float = 14.0,
+        link_require_shared_anchor: bool = True,
     ) -> None:
         # 模拟在线环境的 Oracle 历史记忆库
         self.seen_incidents: Set[str] = set()
@@ -156,9 +170,13 @@ class CTIStreamingBenchmarkGenerator:
         self.seen_actors: Set[str] = set()
         self.similarity_link = similarity_link
         self.jaccard_threshold = jaccard_threshold
+        self.link_time_window_days = link_time_window_days
+        self.link_require_shared_anchor = link_require_shared_anchor
         # 平行报道索引: incident 锚点 -> 标题 token 集合 / token -> 锚点集合
         self._title_tokens: Dict[str, frozenset] = {}
         self._token_index: Dict[str, Set[str]] = {}
+        # 锚点 -> (首次到达时间, actor, cves)，用于复合约束的第 2、3 条
+        self._anchor_meta: Dict[str, Tuple[datetime, Optional[str], frozenset]] = {}
 
     # -- 内部: 标题相似度检索 ---------------------------------------------- #
     def _link_parallel_report(self, doc: CTIDocument) -> Optional[Tuple[str, float]]:
@@ -175,9 +193,22 @@ class CTIStreamingBenchmarkGenerator:
             candidates |= self._token_index.get(token, set())
         best_anchor: Optional[str] = None
         best_score = 0.0
+        window = timedelta(days=self.link_time_window_days)
         # 用 sorted() 固定遍历顺序：集合迭代顺序受字符串哈希随机化影响，
         # 若按原序遍历，打分相同时会选出不同锚点，导致结果不可复现。
         for anchor in sorted(candidates):
+            arrived_at, anchor_actor, anchor_cves = self._anchor_meta.get(
+                anchor, (None, None, frozenset())
+            )
+            # 约束 2: 时间窗（跨半年/跨年的相似标题一律不算同一事件）
+            if arrived_at is not None and abs(doc.publish_time - arrived_at) > window:
+                continue
+            # 约束 3: 至少共享一个弱实体证据（同一 actor 或同一 CVE）
+            if self.link_require_shared_anchor:
+                same_actor = bool(doc.actor_id) and doc.actor_id == anchor_actor
+                shared_cve = bool(set(doc.cves) & set(anchor_cves))
+                if not (same_actor or shared_cve):
+                    continue
             other = self._title_tokens[anchor]
             union = len(tokens | other)
             score = len(tokens & other) / union if union else 0.0
@@ -203,6 +234,11 @@ class CTIStreamingBenchmarkGenerator:
             tokens = tokenize(self._doc_title(doc))
             if tokens and anchor not in self._title_tokens:
                 self._title_tokens[anchor] = tokens
+                self._anchor_meta[anchor] = (
+                    doc.publish_time,
+                    doc.actor_id,
+                    frozenset(doc.cves),
+                )
                 for token in tokens:
                     self._token_index.setdefault(token, set()).add(anchor)
 
@@ -624,6 +660,182 @@ def load_misp_events(source: Any) -> List[CTIDocument]:
 
 
 # --------------------------------------------------------------------------- #
+# MISP 事件按"到达切片"展开（真实 SAME_EVENT 的来源）
+# --------------------------------------------------------------------------- #
+def _session_ranges(
+    timestamps: Iterable[int], gap_seconds: int
+) -> List[Tuple[int, int]]:
+    """把一串时间戳聚成若干"到达批次"，返回每批的 [起, 止] 闭区间。
+
+    同一次分析会话（间隔 <= gap）内的属性算一批；分析员隔天回来补充 IOC 会形成
+    新的一批 —— 这正是"增量证据到达"的真实形态。
+
+    必须保留区间而不是只留起点：只按起点切分会把"属于上一批、但时间戳晚于本批
+    起点"的属性错误地算进下一批。
+    """
+    ordered = sorted({int(t) for t in timestamps})
+    ranges: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    previous: Optional[int] = None
+    for timestamp in ordered:
+        if previous is None or timestamp - previous > gap_seconds:
+            if start is not None and previous is not None:
+                ranges.append((start, previous))
+            start = timestamp
+        previous = timestamp
+    if start is not None and previous is not None:
+        ranges.append((start, previous))
+    return ranges
+
+
+def _limit_sessions(
+    ranges: Sequence[Tuple[int, int]], max_slices: int
+) -> List[Tuple[int, int]]:
+    """批次数超过上限时，反复合并"间隔最小"的相邻两批。"""
+    limited = list(ranges)
+    while len(limited) > max_slices:
+        gaps = [limited[i + 1][0] - limited[i][1] for i in range(len(limited) - 1)]
+        smallest = min(range(len(gaps)), key=lambda i: (gaps[i], i))
+        merged = (limited[smallest][0], limited[smallest + 1][1])
+        limited[smallest : smallest + 2] = [merged]
+    return limited
+
+
+def _iter_misp_event_payloads(source: Any) -> List[Dict[str, Any]]:
+    """接受目录 / 文件 / 内存列表，统一产出完整 Event 字典。"""
+    payload: Any = source
+    if isinstance(source, (str, Path)):
+        source = Path(source)
+    if isinstance(source, Path) and source.is_dir():
+        payload = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(source.glob("*.json"))
+        ]
+    elif isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.suffix.lower() in (".jsonl", ".ndjson"):
+            payload = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        else:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        payload = list(payload.values()) if "uuid" not in payload else [payload]
+    return [_extract_misp_event(record) for record in payload if isinstance(record, dict)]
+
+
+def _attribute_label(attribute: Dict[str, Any]) -> str:
+    value = str(attribute.get("value") or "")
+    if len(value) > 60:
+        value = value[:57] + "..."
+    return f"{attribute.get('type', '?')}:{value}"
+
+
+def load_misp_event_slices(
+    source: Any,
+    session_gap_hours: float = 12.0,
+    max_slices: int = 5,
+    max_attributes_in_content: int = 12,
+) -> List[CTIDocument]:
+    """把一个多轮维护的 MISP 事件按**属性到达时间**切成多条流式文档。
+
+    这是真实 `SAME_EVENT` 的来源：MISP 里同一事件有了新进展时，分析员是往**同一个
+    Event ID** 追加 Attributes/Objects，而不是新建 Event。因此：
+
+      * 切片 0（首报）  -> 共享 `misp-event:<uuid>` 锚点，判为 `UNSEEN`/`RELATED`
+      * 切片 1..k（增量）-> 同一锚点，判为 `SAME_EVENT`（增量证据到达）
+
+    与标题相似度链接不同，这里的 `SAME` 由**真实的 MISP Event ID** 支撑，不依赖
+    文本启发式，因此不存在"把模板化连续波次误判为同一事件"的风险。
+    """
+    documents: List[CTIDocument] = []
+    for event in _iter_misp_event_payloads(source):
+        uuid = event["uuid"]
+        info = event.get("info") or ""
+        tags = event.get("Tag") or []
+        attributes = [a for a in (event.get("Attribute") or []) if isinstance(a, dict)]
+        clusters = _misp_galaxy_clusters(tags)
+        actor_id = next((v for k, v in clusters if k in MISP_ACTOR_GALAXIES), None)
+        campaign_id = next((v for k, v in clusters if k in MISP_CAMPAIGN_GALAXIES), None)
+        tag_cves = {
+            match.group(0).upper()
+            for tag in tags
+            for match in [_CVE_RE.search((tag or {}).get("name", ""))]
+            if match
+        }
+        is_threat_report = any(k in MISP_EVIDENCE_GALAXIES for k, _ in clusters)
+
+        raw_publish = event.get("publish_timestamp") or event.get("timestamp")
+        if raw_publish:
+            event_time = datetime.fromtimestamp(int(raw_publish), timezone.utc)
+        else:
+            event_time = datetime.fromisoformat(str(event.get("date")))
+
+        attr_times = [int(a["timestamp"]) for a in attributes if a.get("timestamp")]
+        event_ts = int(event_time.timestamp())
+        # 发布时刻本身就是第一个"到达点"：事件今天发布、分析员明天补充 IOC，
+        # 会因此形成两个到达批次（这正是 MISP 上最常见的增量形态）。
+        timeline = sorted({event_ts, *attr_times})
+        sessions = _limit_sessions(
+            _session_ranges(timeline, int(session_gap_hours * 3600)), max_slices
+        )
+        if not sessions:
+            sessions = [(event_ts, event_ts)]
+        slice_times = [session[0] for session in sessions]
+
+        for index, (session, moment_ts) in enumerate(zip(sessions, slice_times)):
+            start_ts, end_ts = session
+            moment = datetime.fromtimestamp(moment_ts, timezone.utc)
+            # 无时间戳的属性归入首片；其余按所属会话区间归批
+            batch = [
+                a
+                for a in attributes
+                if (not a.get("timestamp") and index == 0)
+                or (a.get("timestamp") and start_ts <= int(a["timestamp"]) <= end_ts)
+            ]
+            if index and not batch:
+                continue  # 该批次没有新增证据，不生成文档
+
+            slice_cves = set(tag_cves)
+            for attribute in batch:
+                match = _CVE_RE.search(str(attribute.get("value") or ""))
+                if match:
+                    slice_cves.add(match.group(0).upper())
+
+            # 注意：正文里**不能**出现 "arrival slice k/n" 这类字样，否则标签
+            # 会被文本直接泄露。所有切片统一用中性的"已发布属性"表述，模型只能
+            # 依靠标题同一性、时间邻近与属性集合本身去判断是否同一事件。
+            shown = "; ".join(
+                _attribute_label(a) for a in batch[:max_attributes_in_content]
+            )
+            content = f"{info}\n\n[attributes] {len(batch)} records"
+            if shown:
+                content += f": {shown}"
+            if tags:
+                content += "\n[tags] " + "; ".join(
+                    sorted({(t or {}).get("name", "") for t in tags if (t or {}).get("name")})
+                )
+
+            documents.append(
+                CTIDocument(
+                    doc_id=f"{uuid}#s{index + 1}",
+                    publish_time=moment,
+                    content=content,
+                    is_threat_report=is_threat_report,
+                    # 真实 MISP Event ID 作为事件实例锚点（不是标题指纹）
+                    incident_id=f"misp-event:{uuid}",
+                    campaign_id=campaign_id,
+                    actor_id=actor_id,
+                    cves=slice_cves,
+                    title=info,
+                )
+            )
+    return documents
+
+
+# --------------------------------------------------------------------------- #
 # 输出
 # --------------------------------------------------------------------------- #
 def write_jsonl(samples: Sequence[StreamingSample], out_path: Path) -> Path:
@@ -753,6 +965,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     group.add_argument("--stix", metavar="BUNDLE.json", help="STIX 2.1 Bundle 路径")
     group.add_argument("--misp", metavar="MISP.json", help="MISP manifest / 事件导出路径")
     group.add_argument(
+        "--misp-events",
+        metavar="DIR_OR_FILE",
+        help="完整 MISP 事件（含 Attribute），按属性到达时间切片，产生真实 SAME_EVENT",
+    )
+    group.add_argument(
         "--synthetic",
         type=int,
         metavar="N",
@@ -787,12 +1004,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="关闭相似度链接（消融口径；合成流会因此失去 SAME_EVENT 类）",
     )
     parser.add_argument(
-        "--jaccard", type=float, default=0.8, help="相似度链接阈值（默认 0.8）"
+        "--jaccard", type=float, default=0.7, help="相似度链接阈值（默认 0.7）"
+    )
+    parser.add_argument(
+        "--session-gap-hours",
+        type=float,
+        default=12.0,
+        help="--misp-events 的到达批次切分间隔（默认 12 小时）",
+    )
+    parser.add_argument(
+        "--max-slices", type=int, default=5, help="--misp-events 每个事件最多切几片"
+    )
+    parser.add_argument(
+        "--threat-only",
+        action="store_true",
+        help="只用带归属锚点的文档（丢弃 NO_EVENT 噪声），得到类别更均衡的 Real-Augmented 子集",
     )
     args = parser.parse_args(argv)
 
     if args.stix:
         documents = load_stix_bundle(args.stix)
+    elif args.misp_events:
+        documents = load_misp_event_slices(
+            args.misp_events,
+            session_gap_hours=args.session_gap_hours,
+            max_slices=args.max_slices,
+        )
     elif args.misp:
         documents = load_misp_events(args.misp)
     elif args.synthetic is not None:
@@ -806,6 +1043,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         documents = demo_stream()
         args.demo = True
+
+    if args.threat_only:
+        documents = [doc for doc in documents if doc.is_threat_report]
 
     builder = CTIStreamingBenchmarkGenerator(
         similarity_link=args.similarity_link, jaccard_threshold=args.jaccard

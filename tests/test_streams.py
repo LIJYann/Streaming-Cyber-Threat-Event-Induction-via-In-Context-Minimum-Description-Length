@@ -18,6 +18,7 @@ from cti_streaming_benchmark_builder import (  # noqa: E402
     EventLabel,
     incident_fingerprint,
     load_documents,
+    load_misp_event_slices,
     load_misp_events,
     read_jsonl,
     tokenize,
@@ -128,6 +129,174 @@ def test_misp_stream_round_trips_through_jsonl(tmp_path):
 # --------------------------------------------------------------------------- #
 # 平行报道相似度链接
 # --------------------------------------------------------------------------- #
+def _full_misp_event(uuid: str = "cccccccc-0000-4000-8000-000000000001", **overrides) -> dict:
+    """一个多轮维护的真实形态 MISP 事件：属性分三批到达。"""
+    event = {
+        "uuid": uuid,
+        "info": "APT 29 targets diplomatic missions in the Balkans",
+        "date": "2019-01-02",
+        "publish_timestamp": 1546387200,           # 2019-01-02T00:00:00Z
+        "timestamp": 1546820000,                   # 最后一次修改
+        "Orgc": {"name": "CIRCL"},
+        "Tag": [
+            {"name": "misp-galaxy:threat-actor=\"APT 29\""},
+            {"name": "misp-galaxy:ransomware=\"Locky\""},
+        ],
+        "Attribute": [
+            {"type": "sha256", "value": "a" * 64, "timestamp": 1546387200},
+            {"type": "domain", "value": "evil.example", "timestamp": 1546387300},
+            # 第二天补充的 IOC（新的到达批次）
+            {"type": "domain", "value": "c2.example", "timestamp": 1546480000},
+            {"type": "vulnerability", "value": "CVE-2019-1234", "timestamp": 1546480100},
+            # 第三批（数天后）
+            {"type": "ip-dst", "value": "203.0.113.9", "timestamp": 1546820000},
+        ],
+    }
+    event.update(overrides)
+    return event
+
+
+def test_attribute_slicing_yields_real_same_events():
+    """抓手 A：同一个 MISP Event ID 的增量切片必须判为 SAME_EVENT。"""
+    docs = load_misp_event_slices([_full_misp_event()], session_gap_hours=12)
+    assert [d.doc_id for d in docs] == [
+        "cccccccc-0000-4000-8000-000000000001#s1",
+        "cccccccc-0000-4000-8000-000000000001#s2",
+        "cccccccc-0000-4000-8000-000000000001#s3",
+    ]
+    # 三个切片共享真实 MISP Event ID 作为锚点
+    assert {d.incident_id for d in docs} == {
+        "misp-event:cccccccc-0000-4000-8000-000000000001"
+    }
+    samples = CTIStreamingBenchmarkGenerator().process_stream(docs)
+    assert [s.ground_truth_label.name for s in samples] == [
+        "UNSEEN_EVENT",
+        "SAME_EVENT",
+        "SAME_EVENT",
+    ]
+    assert samples[1].target_incident_id == "misp-event:cccccccc-0000-4000-8000-000000000001"
+
+
+def test_attribute_slices_do_not_leak_the_label_in_text():
+    """正文不能出现 slice/update 之类的字样，否则标签被文本直接泄露。"""
+    docs = load_misp_event_slices([_full_misp_event()])
+    for doc in docs:
+        lowered = doc.content.lower()
+        for leak in ("slice", "arrival", "update to", "increment", "#s"):
+            assert leak not in lowered
+    # 但增量切片必须只带新增属性（这是模型真正要用的证据）
+    assert "c2.example" in docs[1].content
+    assert "evil.example" not in docs[1].content
+
+
+def test_slicing_keeps_per_slice_cves():
+    docs = load_misp_event_slices([_full_misp_event()])
+    assert docs[0].cves == set()
+    assert "CVE-2019-1234" in docs[1].cves
+
+
+def test_slicing_of_unattributed_event_is_noise():
+    event = _full_misp_event(uuid="dddddddd-0000-4000-8000-000000000002",
+                             Tag=[{"name": "tlp:white"}])
+    docs = load_misp_event_slices([event])
+    assert docs and all(not d.is_threat_report for d in docs)
+    samples = CTIStreamingBenchmarkGenerator().process_stream(docs)
+    assert all(s.ground_truth_label is EventLabel.NO_EVENT for s in samples)
+
+
+def test_slicing_respects_max_slices():
+    docs = load_misp_event_slices([_full_misp_event()], max_slices=2)
+    assert len(docs) == 2
+
+
+def test_slicing_accepts_directory(tmp_path):
+    (tmp_path / "event.json").write_text(json.dumps(_full_misp_event()), encoding="utf-8")
+    docs = load_misp_event_slices(tmp_path)
+    assert len(docs) == 3
+
+
+def _stub_doc(doc_id, when, title, actor, cves=(), incident="anchor-new"):
+    return CTIDocument(
+        doc_id,
+        when,
+        title,
+        True,
+        incident_id=incident,
+        campaign_id=None,
+        actor_id=actor,
+        cves=set(cves),
+        title=title,
+    )
+
+
+def test_link_requires_shared_actor_or_cve():
+    """复合约束第 3 条: 只有标题相似、没有共享 actor/CVE 时不得判为 SAME。"""
+    title = "ALPHA TIDE ransomware operation disrupted Fairhaven Credit Union in Italy"
+    first = _stub_doc("a", datetime(2026, 1, 2), title, actor="ALPHA TIDE", incident="x1")
+    other_actor = _stub_doc(
+        "b", datetime(2026, 1, 3), title, actor="BETA WOLF", incident="x2"
+    )
+    samples = CTIStreamingBenchmarkGenerator().process_stream([first, other_actor])
+    assert samples[1].ground_truth_label is EventLabel.UNSEEN_EVENT
+
+    shared_cve = _stub_doc(
+        "c",
+        datetime(2026, 1, 3),
+        title,
+        actor="BETA WOLF",
+        cves=["CVE-2026-900001"],
+        incident="x3",
+    )
+    first_with_cve = _stub_doc(
+        "d",
+        datetime(2026, 1, 2),
+        title,
+        actor="ALPHA TIDE",
+        cves=["CVE-2026-900001"],
+        incident="x4",
+    )
+    samples = CTIStreamingBenchmarkGenerator().process_stream([first_with_cve, shared_cve])
+    assert samples[1].ground_truth_label is EventLabel.SAME_EVENT
+
+
+def test_link_respects_time_window():
+    """复合约束第 2 条: 跨过时间窗的相似标题不算同一事件（真实平行报道集中在两周内）。"""
+    title = "ALPHA TIDE ransomware operation disrupted Fairhaven Credit Union in Italy"
+    near = _stub_doc("a", datetime(2026, 1, 2), title, actor="ALPHA TIDE", incident="x1")
+    soon = _stub_doc("b", datetime(2026, 1, 10), title, actor="ALPHA TIDE", incident="x2")
+    late = _stub_doc("c", datetime(2026, 6, 10), title, actor="ALPHA TIDE", incident="x3")
+
+    samples = CTIStreamingBenchmarkGenerator().process_stream([near, soon, late])
+    assert [s.ground_truth_label.name for s in samples] == [
+        "UNSEEN_EVENT",
+        "SAME_EVENT",
+        "RELATED_EVENT",
+    ]
+
+
+def test_template_series_stays_related_not_same():
+    """完全复刻 Locky 波次: 模板化标题 + 同 ransomware 家族 + 无共享 actor/CVE。"""
+    def wave(day: int) -> CTIDocument:
+        title = f'M2M - Locky 2017-09-{day:02d} offline ".ykcol" "Invoice IP1234567"'
+        return CTIDocument(
+            f"locky-{day}",
+            datetime(2017, 9, day),
+            title,
+            True,
+            incident_id=incident_fingerprint(title),
+            campaign_id="Locky",
+            actor_id=None,
+            title=title,
+        )
+
+    samples = CTIStreamingBenchmarkGenerator().process_stream([wave(20), wave(25), wave(29)])
+    assert [s.ground_truth_label.name for s in samples] == [
+        "UNSEEN_EVENT",
+        "RELATED_EVENT",
+        "RELATED_EVENT",
+    ]
+
+
 def _parallel_pair() -> list:
     first = CTIDocument(
         "first",
@@ -205,6 +374,11 @@ def test_similarity_threshold_is_configurable():
     assert samples[1].ground_truth_label is not EventLabel.SAME_EVENT
 
 
+def test_default_threshold_is_seven_tenths():
+    assert CTIStreamingBenchmarkGenerator().jaccard_threshold == 0.7
+    assert CTIStreamingBenchmarkGenerator().link_time_window_days == 14.0
+
+
 # --------------------------------------------------------------------------- #
 # 合成流
 # --------------------------------------------------------------------------- #
@@ -280,7 +454,9 @@ def test_without_linking_same_class_collapses_into_related():
     [
         ("demo_benchmark.jsonl", 5, {"NO_EVENT": 1, "SAME_EVENT": 1, "RELATED_EVENT": 1, "UNSEEN_EVENT": 2}),
         ("sample_benchmark.jsonl", 6, {"NO_EVENT": 1, "SAME_EVENT": 1, "RELATED_EVENT": 2, "UNSEEN_EVENT": 2}),
-        ("misp_osint_benchmark.jsonl", 1680, {"NO_EVENT": 1118, "SAME_EVENT": 13, "RELATED_EVENT": 214, "UNSEEN_EVENT": 335}),
+            ("misp_osint_benchmark.jsonl", 1680, {"NO_EVENT": 1118, "SAME_EVENT": 3, "RELATED_EVENT": 221, "UNSEEN_EVENT": 338}),
+            ("misp_sliced_benchmark.jsonl", 2082, {"NO_EVENT": 1370, "SAME_EVENT": 151, "RELATED_EVENT": 223, "UNSEEN_EVENT": 338}),
+            ("misp_sliced_attributed_benchmark.jsonl", 712, {"SAME_EVENT": 151, "RELATED_EVENT": 223, "UNSEEN_EVENT": 338}),
         ("synthetic_benchmark_1000.jsonl", 1000, {"NO_EVENT": 250, "SAME_EVENT": 250, "RELATED_EVENT": 250, "UNSEEN_EVENT": 250}),
     ],
 )

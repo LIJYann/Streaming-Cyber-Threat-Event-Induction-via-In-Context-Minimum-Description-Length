@@ -209,12 +209,16 @@ def generate_stream(
     seed: int = 20260101,
     mix: Mix = DEFAULT_MIX,
     start: datetime = datetime(2019, 1, 1),
-    jaccard_threshold: float = 0.8,
+    jaccard_threshold: float = 0.7,
+    follow_up_max_days: float = 10.0,
     verify: bool = True,
 ) -> List[CTIDocument]:
     """生成 n 篇受控文档；`similarity_link=True` 口径下的标签分布 == `mix`。
 
     可行性约束: `n_same <= n_unseen + n_related`（每篇平行报道都要有首报）。
+
+    平行报道的时间由构造决定：每篇都排在其首报之后 `follow_up_max_days` 天以内
+    （必须落在状态机的时间窗约束内，否则会被正确地拒绝链接）。
     """
     if n <= 0:
         raise ValueError("n must be positive")
@@ -227,21 +231,22 @@ def generate_stream(
         )
 
     rng = random.Random(seed)
-    remaining: Dict[EventLabel, int] = {
-        EventLabel.NO_EVENT: n_no,
-        EventLabel.SAME_EVENT: n_same,
-        EventLabel.RELATED_EVENT: n_related,
-        EventLabel.UNSEEN_EVENT: n_unseen,
-    }
-
-    documents: List[CTIDocument] = []
+    planned_first_reports = n_unseen + n_related
     introduced_actors: List[str] = []          # 已出现的 actor（RELATED 可复用）
     campaign_of_actor: Dict[str, str] = {}     # actor -> campaign
-    in_flight: List[Dict[str, object]] = []    # 只有一篇报道的事件实例
     first_report_tokens: List[frozenset] = []  # 可区分性约束的参照集
     used_titles: set = set()
     clock = start
     seq = 0
+    dated: List[Tuple[datetime, CTIDocument]] = []
+
+    # 把 n_same 篇平行报道均匀分摊到各起事件上（确定性：索引模 + 洗牌）
+    follow_ups_per_incident = [0] * planned_first_reports
+    if planned_first_reports:
+        slots = [i % planned_first_reports for i in range(n_same)]
+        rng.shuffle(slots)
+        for slot in slots:
+            follow_ups_per_incident[slot] += 1
 
     def build_incident(actor: Optional[str]) -> Dict[str, object]:
         """构造事件实例；actor=None 表示全新 actor（UNSEEN 用）。"""
@@ -287,95 +292,101 @@ def generate_stream(
             "increase the vocabulary or lower FIRST_REPORT_MAX_JACCARD"
         )
 
-    while len(documents) < n:
-        feasible = [
-            label
-            for label in (
-                EventLabel.UNSEEN_EVENT,
-                EventLabel.RELATED_EVENT,
-                EventLabel.SAME_EVENT,
-                EventLabel.NO_EVENT,
-            )
-            if remaining[label] > 0
-            and not (label is EventLabel.SAME_EVENT and not in_flight)
-            and not (label is EventLabel.RELATED_EVENT and not introduced_actors)
-        ]
-        if not feasible:
-            raise RuntimeError("generation deadlock: no feasible label left")
-        label = rng.choices(feasible, weights=[remaining[l] for l in feasible], k=1)[0]
-        remaining[label] -= 1
+    # 阶段一：排布所有"事件单元"（首报 + 其平行报道），UNSEEN/RELATED 交错出现
+    follow_up_window_hours = max(1, int(follow_up_max_days * 24))
+    unseen_left, related_left = n_unseen, n_related
+    for unit in range(planned_first_reports):
         clock += timedelta(hours=rng.randint(1, 60))
-        doc_id = f"syn-doc-{len(documents) + 1:05d}"
-
-        if label is EventLabel.NO_EVENT:
-            title = rng.choice(NOISE_TITLES)
-            documents.append(
-                CTIDocument(
-                    doc_id=doc_id,
-                    publish_time=clock,
-                    content=f"{title}\n\n{rng.choice(NOISE_BODIES)}",
-                    is_threat_report=False,
-                    title=title,
-                )
-            )
-            continue
-
-        if label is EventLabel.SAME_EVENT:
-            source = in_flight.pop(rng.randrange(len(in_flight)))
-            title = _paraphrase(str(source["title"]), rng)
-            body = (
-                f"A second organisation published its own analysis of the "
-                f"{source['victim']} intrusion, corroborating the {source['cve']} entry "
-                f"vector and the {source['data_point']} impact figure. "
-                f"Independent attribution: {source['actor_id']}."
-            )
-            documents.append(
-                CTIDocument(
-                    doc_id=doc_id,
-                    publish_time=clock,
-                    content=f"{title}\n\n{body}",
-                    is_threat_report=True,
-                    # 独立来源持有自己的事件 id：只能靠标题相似度关联到首报
-                    incident_id=f"syn-report-{len(documents) + 1:05d}",
-                    campaign_id=str(source["campaign_id"]),
-                    actor_id=str(source["actor_id"]),
-                    cves={str(source["cve"])},
-                    title=title,
-                )
-            )
-            continue
-
-        if label is EventLabel.UNSEEN_EVENT:
+        is_unseen = bool(unseen_left) and (
+            not introduced_actors  # 第一篇必须先建立已知世界
+            or not related_left
+            or rng.random() < unseen_left / (unseen_left + related_left)
+        )
+        if is_unseen:
             incident = build_incident(actor=None)
             introduced_actors.append(str(incident["actor_id"]))
+            unseen_left -= 1
         else:
             incident = build_incident(actor=rng.choice(introduced_actors))
+            related_left -= 1
 
         first_report_tokens.append(incident["tokens"])  # type: ignore[arg-type]
         used_titles.add(str(incident["title"]))
-        in_flight.append(incident)
-
         body = (
             f"{str(incident['title']).split(' (')[0]}. First public reporting on this "
             f"intrusion. Analysts linked the activity to the {incident['campaign_id']} "
             f"cluster and flagged {incident['cve']} as the initial access vector. "
             f"Impact: {incident['data_point']} at {incident['victim']}."
         )
-        documents.append(
-            CTIDocument(
-                doc_id=doc_id,
-                publish_time=clock,
-                content=f"{incident['title']}\n\n{body}",
-                is_threat_report=True,
-                incident_id=str(incident["incident_id"]),
-                campaign_id=str(incident["campaign_id"]),
-                actor_id=str(incident["actor_id"]),
-                cves={str(incident["cve"])},
-                title=str(incident["title"]),
+        dated.append(
+            (
+                clock,
+                CTIDocument(
+                    doc_id="pending",
+                    publish_time=clock,
+                    content=f"{incident['title']}\n\n{body}",
+                    is_threat_report=True,
+                    incident_id=str(incident["incident_id"]),
+                    campaign_id=str(incident["campaign_id"]),
+                    actor_id=str(incident["actor_id"]),
+                    cves={str(incident["cve"])},
+                    title=str(incident["title"]),
+                ),
             )
         )
 
-    documents.sort(key=lambda d: (d.publish_time, d.doc_id))
+        # 平行报道：独立来源持有自己的事件 id，只能靠标题 + action 弱实体关联
+        for _ in range(follow_ups_per_incident[unit]):
+            delay = timedelta(hours=rng.randint(6, follow_up_window_hours))
+            title = _paraphrase(str(incident["title"]), rng)
+            follow_up_body = (
+                f"A second organisation published its own analysis of the "
+                f"{incident['victim']} intrusion, corroborating the {incident['cve']} "
+                f"entry vector and the {incident['data_point']} impact figure. "
+                f"Independent attribution: {incident['actor_id']}."
+            )
+            dated.append(
+                (
+                    clock + delay,
+                    CTIDocument(
+                        doc_id="pending",
+                        publish_time=clock + delay,
+                        content=f"{title}\n\n{follow_up_body}",
+                        is_threat_report=True,
+                        incident_id=f"syn-report-{seq:05d}-{len(dated):05d}",
+                        campaign_id=str(incident["campaign_id"]),
+                        actor_id=str(incident["actor_id"]),
+                        cves={str(incident["cve"])},
+                        title=title,
+                    ),
+                )
+            )
+
+    # 阶段二：噪声文档均匀撒在整条时间轴上（无锚点，不影响任何状态）
+    if n_no:
+        span_hours = max(1, int((max(t for t, _ in dated) - start).total_seconds() // 3600))
+        for index in range(n_no):
+            title = rng.choice(NOISE_TITLES)
+            moment = start + timedelta(hours=rng.randint(0, span_hours))
+            dated.append(
+                (
+                    moment,
+                    CTIDocument(
+                        doc_id="pending",
+                        publish_time=moment,
+                        content=f"{title}\n\n{rng.choice(NOISE_BODIES)}",
+                        is_threat_report=False,
+                        title=title,
+                    ),
+                )
+            )
+
+    # 阶段三：按时间排序后统一编号（doc_id 顺序即回放顺序）
+    dated.sort(key=lambda item: item[0])
+    documents: List[CTIDocument] = []
+    for index, (moment, doc) in enumerate(dated, start=1):
+        doc.doc_id = f"syn-doc-{index:05d}"
+        documents.append(doc)
 
     if verify:
         observed = verify_stream(documents, jaccard_threshold=jaccard_threshold)
@@ -430,7 +441,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--out", metavar="STREAM.jsonl", help="导出输入流 JSONL")
     parser.add_argument(
-        "--jaccard", type=float, default=0.8, help="相似度链接阈值（默认 0.8）"
+        "--jaccard", type=float, default=0.7, help="相似度链接阈值（默认 0.7）"
     )
     args = parser.parse_args(argv)
 
