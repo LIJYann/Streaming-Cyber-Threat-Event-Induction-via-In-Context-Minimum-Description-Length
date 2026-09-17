@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+
+# 原始抓取数据不入库（体积大、可随时重新抓取）；派生出的 JSONL 才进版本库
+data/raw/
