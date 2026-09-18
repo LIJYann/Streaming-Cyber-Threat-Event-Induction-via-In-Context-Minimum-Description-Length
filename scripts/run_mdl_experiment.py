@@ -339,7 +339,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "n_documents": len(rows),
                 "output": str(args.output),
                 "diagnostics": str(args.diagnostics) if args.diagnostics else None,
-                "device": getattr(scorer, "device", "cpu"),
+                "device": str(getattr(scorer, "device", "cpu")),
             },
             ensure_ascii=False,
         ),
