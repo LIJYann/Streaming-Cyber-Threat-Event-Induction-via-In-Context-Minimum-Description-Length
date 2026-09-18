@@ -1,0 +1,22 @@
+{
+  "stream": "synthetic_input_notitle_1000.jsonl",
+  "benchmark": "synthetic_benchmark_1000.jsonl",
+  "n_documents": 1000,
+  "warmup": 200,
+  "n_scored": 800,
+  "predictor": "synthetic_top4_predictions.jsonl",
+  "macro_f1": 0.2999,
+  "accuracy": 0.3887,
+  "per_class_f1": {
+    "NO_EVENT": 0.7922,
+    "SAME_EVENT": 0.4073,
+    "RELATED_EVENT": 0.0,
+    "UNSEEN_EVENT": 0.0
+  },
+  "b_cubed_precision": 0.0027,
+  "b_cubed_recall": 1.0,
+  "b_cubed_f1": 0.0054,
+  "ari": 0.0,
+  "n_gold_clusters": 418,
+  "n_pred_clusters": 1
+}
