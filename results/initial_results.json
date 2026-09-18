@@ -1,0 +1,18 @@
+{
+  "protocol": {
+    "projection": "notitle",
+    "warmup": 200,
+    "model": "microsoft/phi-3-mini-4k-instruct (local snapshot)",
+    "max_length": 256,
+    "top_k": 2
+  },
+  "synthetic": {
+    "deterministic_baseline": {"macro_f1": 0.3222, "same_f1": 0.0, "b_cubed_f1": 0.8360, "ari": 0.0},
+    "phi3_mdl": {"macro_f1": 0.2999, "same_f1": 0.4073, "b_cubed_f1": 0.0054, "ari": 0.0}
+  },
+  "real_augmented": {
+    "deterministic_baseline": {"macro_f1": 0.1457, "same_f1": 0.0263, "b_cubed_f1": 0.8939, "ari": 0.0},
+    "phi3_mdl": {"macro_f1": 0.1629, "same_f1": 0.1705, "b_cubed_f1": 0.5690, "ari": 0.0019}
+  },
+  "status": "initial single-seed results; no superiority claim"
+}
