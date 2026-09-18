@@ -211,8 +211,8 @@ def validate_model_input(rows: Sequence[Dict]) -> None:
         leaked = sorted(_FORBIDDEN_FIELDS.intersection(row))
         if leaked:
             raise ValueError(f"model-input row {index} contains forbidden fields: {leaked}")
-        if not (_text(row).strip()):
-            raise ValueError(f"row {index} has no title/text")
+        # Empty text is a valid model-facing representation of a NO_EVENT row;
+        # it must be scored and emitted as a prediction rather than dropped.
 
 
 def run_stream(
