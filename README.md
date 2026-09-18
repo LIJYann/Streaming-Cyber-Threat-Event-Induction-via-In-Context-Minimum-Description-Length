@@ -271,6 +271,16 @@ JSON Lines，一篇文档一行：
 
 ## 目录结构
 
+## 实验复现状态
+
+当前可复现结果统一记录在 [`results/experiment_manifest.json`](results/experiment_manifest.json)。
+主协议固定为 `notitle` 投影、`warmup=200`，并同时报告 Macro-F1、SAME-F1、B-cubed F1
+和 ARI。结果目录还包含确定性基线、Phi-3 Mini 本地运行、bootstrap 区间、阈值复放和自动化
+混淆矩阵。运行 `python scripts/build_all.py check` 与 `python -m pytest -q` 可验证冻结数据和代码。
+
+Phi-3 结果是单模型单次本地运行，论文不将其写成普遍优越性结论；当前环境没有第二个本地
+模型，因此模型间泛化和独立随机种子比较仍属于后续实验。
+
 ```
 ├── cti_streaming_benchmark_builder.py   # 状态机 + STIX/MISP/切片摄取 + JSONL 导出 + CLI
 ├── synthetic_stream.py                  # 受控合成流生成器（比例可控 + 自校验）
