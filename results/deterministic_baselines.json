@@ -1,0 +1,21 @@
+{
+  "protocol": {
+    "projection": "notitle",
+    "warmup": 200,
+    "metrics": ["macro_f1", "b_cubed", "ari"],
+    "note": "Built-in CPU baselines evaluated through scripts/evaluate.py"
+  },
+  "synthetic": {
+    "majority": {"macro_f1": 0.1028, "accuracy": 0.2587, "b_cubed_f1": 0.8360, "ari": 0.0},
+    "title_seen": {"macro_f1": 0.0868, "accuracy": 0.2100, "b_cubed_f1": 0.0054, "ari": 0.0},
+    "title_jaccard": {"macro_f1": 0.1028, "accuracy": 0.2587, "b_cubed_f1": 0.8360, "ari": 0.0},
+    "text_jaccard": {"macro_f1": 0.1065, "accuracy": 0.2562, "b_cubed_f1": 0.8324, "ari": -0.0001}
+  },
+  "real_augmented": {
+    "majority": {"macro_f1": 0.1941, "accuracy": 0.6344, "b_cubed_f1": 0.8957, "ari": 0.0},
+    "title_seen": {"macro_f1": 0.0358, "accuracy": 0.0770, "b_cubed_f1": 0.0043, "ari": 0.0},
+    "title_jaccard": {"macro_f1": 0.1941, "accuracy": 0.6344, "b_cubed_f1": 0.8957, "ari": 0.0},
+    "text_jaccard": {"macro_f1": 0.2062, "accuracy": 0.6323, "b_cubed_f1": 0.8916, "ari": -0.0002}
+  },
+  "status": "deterministic single-seed baselines; no superiority claim"
+}
