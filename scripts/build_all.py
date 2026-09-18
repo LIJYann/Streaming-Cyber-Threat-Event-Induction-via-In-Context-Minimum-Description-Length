@@ -71,6 +71,7 @@ FORBIDDEN_IN_MODEL_INPUT = (
 MODEL_INPUT_ASSETS = [
     "misp_osint_benchmark.jsonl",
     "misp_sliced_benchmark.jsonl",
+    "misp_sliced_attributed_benchmark.jsonl",
     "synthetic_benchmark_1000.jsonl",
 ]
 FREEZE_LOCK = DATA / "FROZEN.sha256"
@@ -279,6 +280,7 @@ def build_model_inputs() -> List[Path]:
         if not source.exists():
             continue
         rows = []
+        rows_no_title = []
         for row in read_jsonl(source):
             text = row["content"]
             for token in FORBIDDEN_IN_MODEL_INPUT:
@@ -294,13 +296,32 @@ def build_model_inputs() -> List[Path]:
                     "text": text,
                 }
             )
+            # 标题消融版：MISP 会沿用同一条 event headline，因此"标题完全相同"是
+            # 同一事件的强线索；要论证模型真的在做事件归纳，必须同时给出无标题口径。
+            rows_no_title.append(
+                {
+                    "id": row["id"],
+                    "publish_time": row["publish_time"],
+                    "text": text,
+                }
+            )
         target = out_dir / name.replace("_benchmark", "_input")
-        with target.open("w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _write_rows(target, rows)
         written.append(target)
-        print(f"[build] model_input  {target.name} ({len(rows)} rows)")
+        target_no_title = out_dir / name.replace("_benchmark", "_input_notitle")
+        _write_rows(target_no_title, rows_no_title)
+        written.append(target_no_title)
+        print(
+            f"[build] model_input  {target.name} ({len(rows)} rows) + "
+            f"{target_no_title.name} ({len(rows_no_title)} rows)"
+        )
     return written
+
+
+def _write_rows(path: Path, rows: Sequence[Dict]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 # --------------------------------------------------------------------------- #

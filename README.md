@@ -15,7 +15,7 @@ python3 scripts/build_all.py freeze  # 写入 data/FROZEN.sha256 指纹锁（数
 python3 scripts/build_all.py check   # 离线重算 + 逐字节比对已提交产物
 python3 scripts/build_all.py all     # 上面三步
 
-python3 -m pytest tests -q           # 57 passed
+python3 -m pytest tests -q           # 60 passed
 ```
 
 `check` 只依赖仓库里已提交的快照：它会重新标注每一个 `*_stream.jsonl` 并与已提交的
@@ -54,6 +54,39 @@ python3 -m pytest tests -q           # 57 passed
 
 残留的类别相关性只有**数据固有一项**：`SAME` 切片正文更短（中位 166 vs `UNSEEN` 411），
 因为增量证据本来就少。建议论文里显式披露或做长度归一化对照。
+
+## 标题捷径审计（审稿人一定会问的那个问题）
+
+**事实**：`SAME_EVENT` 的增量切片来自同一个 MISP Event，而 MISP 沿用同一条 headline，
+所以同一事件的切片**标题逐字相同**（实测 112 个多切片事件中 111 个 = 99.1%）。
+
+这个事实无法回避，但可以量化 + 消融。跑 `python3 scripts/baselines.py` 得到全部基线
+（都跑在真正喂给模型的 `data/model_input/*.jsonl` 上，标签用 `id` 回连）：
+
+| 资产 | 口径 | `title_seen` SAME-F1 | `*_jaccard` SAME-F1 | 最好朴素规则 macro-F1 |
+|------|------|----------------------|---------------------|------------------------|
+| Real-Wild 1680 | 带标题 | 0.667（仅 3 个正例） | 0.012 | 0.366 |
+| Real-Augmented 2082 | 带标题 | 0.540 | 0.263 | 0.318 |
+| Real-Augmented-Attributed 712 | 带标题 | **0.990** ← 伪任务风险 | 0.717 | 0.436 |
+| Real-Augmented 2082 | **无标题** | — | **0.046** | 0.210 |
+| Real-Augmented-Attributed 712 | **无标题** | — | **0.037** | 0.169 |
+| Controlled-Synthetic 1000 | 带/无标题 | 0.000 | 0.817 / 0.879 | 0.345 / 0.347 |
+
+结论与使用协议：
+
+1. **主任务（4-way）没有被捷径解掉**：任何朴素规则（含 `title_seen`）的 macro-F1 上限
+   只有 0.318 ~ 0.436，`RELATED` 全部为 0。论文应以 macro-F1（开集、多类）为主指标。
+2. **`SAME` 专项结论必须用无标题口径**：`*_input_notitle.jsonl` 抹掉 headline，
+   此时文本相似度基线掉到 SAME-F1 0.037–0.046，模型只能靠 CVE/actor/受害目标/指标集合
+   等证据判断。带标题口径（0.990）只用于"用了捷径能到多少"的对照。
+3. **正文不再重复标题**：切片正文只承载证据（指标与批注），标题单独放在 `title` 字段，
+   两个口径因此可以干净地切换。
+4. 合成流的 `SAME` 是**改写级平行报道**，因此文本相似度基线自然偏高（0.88）——这是该资产
+   的设计（测改写识别），不要用它论证"模型会做事件归纳"。
+
+这三条已固化为 `tests/test_baselines.py`：既断言"没有规则能刷满 4-way"，也断言
+"无标题后捷径确实失效"，同时把 attributed 子集的 0.990 保留为**显式已知属性**，
+防止有人在不知情的情况下用它宣称 SAME 召回率。
 
 ## 四个评测资产
 

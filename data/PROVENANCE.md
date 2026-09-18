@@ -15,15 +15,22 @@ SHA-256 表格，避免两处不一致）。`check` 会同时校验指纹锁与�
 
 ## 0. 模型侧投影（喂给模型的就是这个）
 
-| 文件 | 条数 | 内容 |
+| 文件 | 条数 | 字段 |
 |------|------|------|
-| `model_input/misp_osint_input.jsonl` | 1680 | `{id, publish_time, title, text}` |
-| `model_input/misp_sliced_input.jsonl` | 2082 | 同上 |
-| `model_input/synthetic_input_1000.jsonl` | 1000 | 同上 |
+| `model_input/misp_osint_input[_notitle].jsonl` | 1680 | `{id, publish_time, title, text}` / `{id, publish_time, text}` |
+| `model_input/misp_sliced_input[_notitle].jsonl` | 2082 | 同上 |
+| `model_input/misp_sliced_attributed_input[_notitle].jsonl` | 712 | 同上 |
+| `model_input/synthetic_input[_notitle]_1000.jsonl` | 1000 | 同上 |
 
 投影只保留 `publish_time` / `title` / `text`，`id` 是不透明哈希（回连 `*_benchmark.jsonl`
 的 `id` 字段取标签）。所有 GT 字段（`incident_id` / `actor_id` / `campaign_id` /
 `target_incident_id` / `ground_truth_label*`）与切片序号都**不在**投影里。
+
+**`_notitle` 是标题消融口径**：MISP 沿用同一条 event headline，同一事件的切片标题逐字
+相同（112 个多切片事件里 111 个），因此带标题时 `if title in seen: return SAME` 就能在
+归属子集上拿到 SAME-F1 0.990。`SAME` 专项结论请用 `_notitle`（此时同类捷径跌到 0.037），
+带标题口径只作为对照。完整基线表见 `python3 scripts/baselines.py` 与 README。
+切片正文也不再重复标题：正文只承载证据（指标、批注），标题单独在 `title` 字段。
 
 ## 1. 真实流 A：CIRCL MISP OSINT feed（事件级元数据）
 

@@ -802,10 +802,10 @@ def _shorten(value: str, limit: int = 80) -> str:
 
 def render_attribute_summary(
     attributes: Sequence[Dict[str, Any]],
-    info: str,
-    org: Optional[str] = None,
+    info: Optional[str] = None,
     max_examples: int = 3,
     max_content_chars: int = 1500,
+    include_headline: bool = False,
 ) -> str:
     """把一批 MISP 属性渲染成**可读的自然语言正文**。
 
@@ -818,9 +818,12 @@ def render_attribute_summary(
     渲染模板对所有到达批次**完全一致**（不出现 initial / new / update 等字样），
     因此正文本身不携带标签信息。
     """
-    lines: List[str] = [info, ""]
-    if org:
-        lines.append(f"Reported by {org}.")
+    # 正文默认**不重复标题**：`title` 已经是单独的字段。把事件标题同时写进正文会让
+    # "同一事件 = 同一标题"变成一个一行代码就能命中的捷径（同一 MISP Event 的所有
+    # 切片 info 完全相同），因此正文只承载"证据"（指标、批注）。
+    lines: List[str] = []
+    if include_headline and info:
+        lines.extend([info, ""])
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     prose: List[str] = []
@@ -972,7 +975,6 @@ def load_misp_event_slices(
             content = render_attribute_summary(
                 batch,
                 info,
-                org=None,
                 max_content_chars=max_attributes_in_content * 120,
             )
 
