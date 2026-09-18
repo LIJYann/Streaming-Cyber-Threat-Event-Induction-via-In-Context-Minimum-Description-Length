@@ -151,9 +151,12 @@ class LocalCausalScorer:
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(model_path), local_files_only=True
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            str(model_path), local_files_only=True
-        ).to(self.device)
+        load_kwargs = {"local_files_only": True}
+        if self.device.type == "cuda":
+            load_kwargs.update({"torch_dtype": torch.float16, "device_map": "auto"})
+            self.model = AutoModelForCausalLM.from_pretrained(str(model_path), **load_kwargs)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(str(model_path), **load_kwargs).to(self.device)
         self.model.eval()
         self.max_length = max(2, int(max_length))
         self.bos_id = (
