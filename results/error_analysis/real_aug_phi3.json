@@ -1,0 +1,66 @@
+{
+  "warmup": 200,
+  "n_scored": 1882,
+  "per_class": {
+    "NO_EVENT": {
+      "support": 1194,
+      "precision": 0.5743,
+      "recall": 0.0486
+    },
+    "SAME_EVENT": {
+      "support": 145,
+      "precision": 0.0954,
+      "recall": 0.8
+    },
+    "RELATED_EVENT": {
+      "support": 219,
+      "precision": 0.1965,
+      "recall": 0.3562
+    },
+    "UNSEEN_EVENT": {
+      "support": 324,
+      "precision": 0.2024,
+      "recall": 0.1049
+    }
+  },
+  "confusion_matrix": {
+    "NO_EVENT": {
+      "NO_EVENT": 58,
+      "SAME_EVENT": 788,
+      "RELATED_EVENT": 238,
+      "UNSEEN_EVENT": 110
+    },
+    "SAME_EVENT": {
+      "NO_EVENT": 20,
+      "SAME_EVENT": 116,
+      "RELATED_EVENT": 3,
+      "UNSEEN_EVENT": 6
+    },
+    "RELATED_EVENT": {
+      "NO_EVENT": 8,
+      "SAME_EVENT": 115,
+      "RELATED_EVENT": 78,
+      "UNSEEN_EVENT": 18
+    },
+    "UNSEEN_EVENT": {
+      "NO_EVENT": 15,
+      "SAME_EVENT": 197,
+      "RELATED_EVENT": 78,
+      "UNSEEN_EVENT": 34
+    }
+  },
+  "errors": {
+    "NO_EVENT -> RELATED_EVENT": 238,
+    "NO_EVENT -> SAME_EVENT": 788,
+    "UNSEEN_EVENT -> RELATED_EVENT": 78,
+    "NO_EVENT -> UNSEEN_EVENT": 110,
+    "RELATED_EVENT -> SAME_EVENT": 115,
+    "SAME_EVENT -> UNSEEN_EVENT": 6,
+    "RELATED_EVENT -> UNSEEN_EVENT": 18,
+    "SAME_EVENT -> NO_EVENT": 20,
+    "UNSEEN_EVENT -> SAME_EVENT": 197,
+    "SAME_EVENT -> RELATED_EVENT": 3,
+    "RELATED_EVENT -> NO_EVENT": 8,
+    "UNSEEN_EVENT -> NO_EVENT": 15
+  }
+}

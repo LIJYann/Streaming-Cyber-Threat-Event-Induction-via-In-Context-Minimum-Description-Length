@@ -1,0 +1,57 @@
+{
+  "warmup": 200,
+  "n_scored": 800,
+  "per_class": {
+    "NO_EVENT": {
+      "support": 218,
+      "precision": 1.0,
+      "recall": 0.656
+    },
+    "SAME_EVENT": {
+      "support": 168,
+      "precision": 0.2557,
+      "recall": 1.0
+    },
+    "RELATED_EVENT": {
+      "support": 207,
+      "precision": 0.0,
+      "recall": 0.0
+    },
+    "UNSEEN_EVENT": {
+      "support": 207,
+      "precision": 0.0,
+      "recall": 0.0
+    }
+  },
+  "confusion_matrix": {
+    "NO_EVENT": {
+      "NO_EVENT": 143,
+      "SAME_EVENT": 75,
+      "RELATED_EVENT": 0,
+      "UNSEEN_EVENT": 0
+    },
+    "SAME_EVENT": {
+      "NO_EVENT": 0,
+      "SAME_EVENT": 168,
+      "RELATED_EVENT": 0,
+      "UNSEEN_EVENT": 0
+    },
+    "RELATED_EVENT": {
+      "NO_EVENT": 0,
+      "SAME_EVENT": 207,
+      "RELATED_EVENT": 0,
+      "UNSEEN_EVENT": 0
+    },
+    "UNSEEN_EVENT": {
+      "NO_EVENT": 0,
+      "SAME_EVENT": 207,
+      "RELATED_EVENT": 0,
+      "UNSEEN_EVENT": 0
+    }
+  },
+  "errors": {
+    "NO_EVENT -> SAME_EVENT": 75,
+    "RELATED_EVENT -> SAME_EVENT": 207,
+    "UNSEEN_EVENT -> SAME_EVENT": 207
+  }
+}
