@@ -195,6 +195,27 @@ def predict(
     return predictions
 
 
+def validate_predictions(stream_rows: Sequence[Dict], predictions: Sequence[Dict]) -> None:
+    """Reject malformed output, especially targets that point to the future."""
+    if len(stream_rows) != len(predictions):
+        raise ValueError("prediction count does not match stream count")
+    seen: Set[str] = set()
+    allowed = {"NO_EVENT", "SAME_EVENT", "RELATED_EVENT", "UNSEEN_EVENT"}
+    for row, prediction in zip(stream_rows, predictions):
+        if prediction.get("id") != row.get("id"):
+            raise ValueError("prediction ids must preserve stream order")
+        label = prediction.get("label")
+        if label not in allowed:
+            raise ValueError(f"invalid prediction label: {label!r}")
+        target = prediction.get("target")
+        if label == "SAME_EVENT":
+            if not isinstance(target, str) or target not in seen:
+                raise ValueError("SAME_EVENT target must refer to an earlier document")
+        elif target is not None:
+            raise ValueError("only SAME_EVENT predictions may have a target")
+        seen.add(row["id"])
+
+
 def _write_jsonl(path: Path, rows: Iterable[Dict]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -218,6 +239,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         related_threshold=args.related_threshold,
         same_window_days=args.same_window_days,
     )
+    validate_predictions(rows, predictions)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _write_jsonl(args.output, predictions)
     return 0

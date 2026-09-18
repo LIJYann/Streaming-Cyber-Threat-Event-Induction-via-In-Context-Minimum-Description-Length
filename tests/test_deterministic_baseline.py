@@ -80,3 +80,16 @@ def test_output_contract_is_jsonl_and_has_no_ground_truth_fields(baseline, tmp_p
     assert set(output) == {"id", "label", "target"}
     assert "target_incident_id" not in output
     assert "ground_truth_label_name" not in output
+
+
+def test_validator_rejects_future_target(baseline):
+    rows = [
+        _row("first", "2024-01-01T00:00:00", "new malware intrusion"),
+        _row("second", "2024-01-01T01:00:00", "new malware intrusion"),
+    ]
+    malformed = [
+        {"id": "first", "label": "SAME_EVENT", "target": "second"},
+        {"id": "second", "label": "UNSEEN_EVENT", "target": None},
+    ]
+    with pytest.raises(ValueError, match="earlier"):
+        baseline.validate_predictions(rows, malformed)
