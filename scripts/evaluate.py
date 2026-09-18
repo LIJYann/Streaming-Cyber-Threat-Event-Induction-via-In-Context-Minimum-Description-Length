@@ -212,6 +212,11 @@ def main(argv=None) -> int:
             and pred_by_id.get(doc_id, {}).get("label", "NO_EVENT")
             != EventLabel.NO_EVENT.name
         }
+        # A predicted NO_EVENT still counts as a missed event for clustering
+        # metrics. Give each omitted gold document its own singleton cluster so
+        # B-cubed recall and ARI are not inflated by dropping those documents.
+        for doc_id in gold_map:
+            pred_map.setdefault(doc_id, f"missing:{doc_id}")
         cluster_scores = clustering_scores(doc_ids, gold_map, pred_map)
         if "b_cubed" in requested:
             summary["b_cubed_precision"] = round(cluster_scores["precision"], 4)
