@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from deterministic_baseline import validate_predictions
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -169,6 +170,11 @@ def main(argv=None) -> int:
         print("[error] 需要 --pred 或 --baseline", file=sys.stderr)
         return 2
 
+    try:
+        validate_predictions(stream_rows, predictions)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     warmup_raw = str(args.warmup)
     if warmup_raw.endswith("%"):
         cut = int(len(stream_rows) * float(warmup_raw.rstrip("%")) / 100)
@@ -203,7 +209,12 @@ def main(argv=None) -> int:
     if "b_cubed" in requested or "ari" in requested:
         gold_map = gold_clusters(scored_rows and [by_id[i] for i in doc_ids] or [])
         gold_map = {row["id"]: gold_map[row["id"]] for row in scored_rows if row["id"] in gold_map}
-        pred_map = clusters_from_predictions(doc_ids, predicted, targets)
+        # Replay all state, including warm-up merges, before restricting scoring.
+        pred_map = clusters_from_predictions(
+            [row["id"] for row in stream_rows],
+            [row["label"] for row in predictions],
+            [row.get("target") for row in predictions],
+        )
         # 预测成 NO_EVENT 的文档不进入事件图
         pred_map = {
             doc_id: cluster

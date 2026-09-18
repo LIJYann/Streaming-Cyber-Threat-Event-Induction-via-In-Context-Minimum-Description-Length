@@ -202,6 +202,8 @@ def validate_predictions(stream_rows: Sequence[Dict], predictions: Sequence[Dict
     seen: Set[str] = set()
     allowed = {"NO_EVENT", "SAME_EVENT", "RELATED_EVENT", "UNSEEN_EVENT"}
     for row, prediction in zip(stream_rows, predictions):
+        if row.get("id") in seen:
+            raise ValueError("duplicate stream id")
         if prediction.get("id") != row.get("id"):
             raise ValueError("prediction ids must preserve stream order")
         label = prediction.get("label")
