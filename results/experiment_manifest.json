@@ -1,0 +1,26 @@
+{
+  "protocol": {
+    "projection": "notitle",
+    "warmup": 200,
+    "evaluation": "scripts/evaluate.py",
+    "metrics": ["macro_f1", "accuracy", "same_f1", "b_cubed_f1", "ari"]
+  },
+  "streams": {
+    "synthetic": {"model_input": "data/model_input/synthetic_input_notitle_1000.jsonl", "benchmark": "data/synthetic_benchmark_1000.jsonl", "documents": 1000},
+    "real_augmented": {"model_input": "data/model_input/misp_sliced_input_notitle.jsonl", "benchmark": "data/misp_sliced_benchmark.jsonl", "documents": 2082}
+  },
+  "predictors": {
+    "deterministic": "results/initial_results.json",
+    "built_in_baselines": "results/deterministic_baselines.json",
+    "phi3_mdl": "runs/phi3/ (local, ignored runtime outputs)",
+    "bootstrap": "results/bootstrap/",
+    "threshold_replay": "results/threshold/",
+    "error_analysis": "results/error_analysis/"
+  },
+  "reproducibility": {
+    "frozen_build_check": "python scripts/build_all.py check",
+    "tests": "python -m pytest -q",
+    "model": "local Phi-3 Mini snapshot; single run; no superiority claim",
+    "known_gap": "No second local model or independent model-seed runs are available in this environment."
+  }
+}
