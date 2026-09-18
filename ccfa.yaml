@@ -1,0 +1,20 @@
+project:
+  title: "Streaming Cyber-Threat Event Induction via In-Context Minimum Description Length"
+  venue: "ICLR 2027"
+  benchmark: "https://github.com/LIJYann/Streaming-Cyber-Threat-Event-Induction-via-In-Context-Minimum-Description-Length"
+  overleaf: "https://www.overleaf.com/project/6aacdc5d6f62fa94d16b63e1"
+  stage: benchmark_validation
+  data_policy: frozen_sources_no_new_feeds
+workflow:
+  debate:
+    idea: Astra
+    planning: Sol
+    implementation_writing: Luna
+  current_gate: synthetic_generation_and_reproducibility
+  next_gate: evaluation_audit_and_manuscript_sync
+claims:
+  status: hypotheses_until_reproduced
+  restricted: ["7B beats GPT-4o", "10x/15x latency gain", "zero state crashes"]
+evidence:
+  real_augmented_notitle_unanchored: {SAME_EVENT: 0.430, RELATED_EVENT: 0.166}
+  synthetic_mix: {NO_EVENT: 250, SAME_EVENT: 250, RELATED_EVENT: 250, UNSEEN_EVENT: 250}

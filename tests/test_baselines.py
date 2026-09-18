@@ -69,13 +69,8 @@ def test_title_ablation_removes_the_same_event_shortcut(baselines):
 
 
 def test_title_shortcut_is_documented_not_hidden(baselines):
-    """带标题口径下，attributed 子集确实可以被一行规则刷满 —— 这个事实必须保留可见。
-
-    我们不去粉饰它，而是把它固化成一个"已知属性"：任何人改动数据构建方式时，
-    这个断言会提醒他同步更新文档与基线表。
-    """
+    """标题投影保留为上界参考，不能成为 SAME 的逐字捷径。"""
     rows, gold = _inputs(baselines, "real-augmented-attributed", with_title=True)
     scores = baselines._score(gold, baselines._seen_rule(rows, "title"))
-    assert scores["SAME_EVENT_f1"] > 0.90
-    # 同时: 同一个规则在 4-way 上的 macro-F1 依然很低 -> 主任务没有被解掉
+    assert scores["SAME_EVENT_f1"] < 0.20
     assert scores["macro_f1"] < 0.60

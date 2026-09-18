@@ -135,6 +135,23 @@ PUBLISHERS = [
     "a commercial intelligence vendor", "a sector information sharing centre",
     "an incident response consultancy", "a university security lab",
 ]
+
+# 多视角平行报道（Multi-View）：同一事件的两类报告词汇几乎不重叠 ——
+# 网络侧看 C2/DNS/外发流量，终端侧看注册表驻留/内存注入/补丁状态。
+# 这样"词汇相似度"基线会彻底失效，而共享实体（actor + victim）让任务保持可解。
+VIEW_NETWORK = "network"
+VIEW_ENDPOINT = "endpoint"
+VIEWS = (VIEW_NETWORK, VIEW_ENDPOINT)
+NETWORK_DETAILS = [
+    "beacon jitter of 43 seconds", "TLS certificate reuse across hosts",
+    "DNS fast-flux rotation", "sinkholed resolution patterns",
+    "periodic egress to two hosting ranges",
+]
+ENDPOINT_DETAILS = [
+    "a Run key under the user hive", "injected threads inside a signed binary",
+    "a scheduled task created at logon", "an unpatched build of the workstation image",
+    "credential material read from a browser store",
+]
 NOISE_BODIES = [
     "General advice, no adversary activity or named campaign is described.",
     "Educational material for administrators; no indicators or victims are mentioned.",
@@ -185,6 +202,41 @@ def max_jaccard(tokens: frozenset, others: Sequence[frozenset]) -> float:
     return best
 
 
+class TitleIndex:
+    """标题去重与"可区分性"检查的索引（token 倒排，避免 O(n^2) 两两比较）。"""
+
+    def __init__(self) -> None:
+        self.titles: set = set()
+        self.tokens: List[frozenset] = []
+        self._postings: Dict[str, set] = {}
+
+    def add(self, title: str) -> None:
+        tokens = tokenize(title)
+        self.titles.add(title)
+        self.tokens.append(tokens)
+        position = len(self.tokens) - 1
+        for token in tokens:
+            self._postings.setdefault(token, set()).add(position)
+
+    def too_close(self, title: str, max_jaccard: float) -> bool:
+        """标题是否与既有标题过于相似（用于防止跨事件误连）。"""
+        if title in self.titles:
+            return True
+        tokens = tokenize(title)
+        if not tokens:
+            return False
+        candidates: set = set()
+        ranked = sorted(tokens, key=lambda t: (len(self._postings.get(t, ())), t))
+        for token in ranked[:4]:
+            candidates |= self._postings.get(token, set())
+        for position in candidates:
+            other = self.tokens[position]
+            union = len(tokens | other)
+            if union and len(tokens & other) / union > max_jaccard:
+                return True
+        return False
+
+
 def actor_name(index: int) -> str:
     """唯一的虚构 actor 名（30 x 30 = 900 组合，超出后追加编号）。"""
     cycle, position = divmod(index, len(ACTOR_ADJECTIVES) * len(ACTOR_NOUNS))
@@ -207,32 +259,90 @@ def _paraphrase(title: str, rng: random.Random) -> str:
     return swapped
 
 
-def _report_body(incident: Dict[str, object], rng: random.Random) -> str:
-    """首报与平行报道**共用**的正文生成器。
+def _view_title(incident: Dict[str, object], view: str, rng: random.Random) -> str:
+    """按视角生成标题：共享 actor 与 victim 两个实体，其余词汇完全不重叠。
 
-    两条硬约束:
-      1. 结构必须同构: 不允许出现 "first / second / independently corroborates"
-         这类元陈述，否则正文本身就成了 100% 准确的标签判据。
-      2. 同一事件的多篇报道要**措辞不同**（随机选模板、随机选发布方、随机排列
-         事实顺序），否则 SAME 会退化成"两份文本逐字相同"，模型只需做拷贝检测，
-         而不是判断"这两段描述是不是同一起事件"。
+    标题里带一个**该视角特有的技术句柄**（网络侧节点名 / 终端侧模块名），它同时
+    保证了两条不变量：标题全局唯一，且任意两篇标题的 Jaccard 远低于链接阈值。
     """
-    sector = SECTORS[len(str(incident["incident_id"])) % len(SECTORS)]
+    actor = incident["actor_id"]
+    victim = incident["victim"]
+    data_point = incident["data_point"]
+    if view == VIEW_NETWORK:
+        detail = rng.choice(NETWORK_DETAILS)
+        handle = f"{rng.choice(['edge', 'node', 'relay', 'hop'])}-{rng.randint(1000, 9999)}"
+        return (
+            f"{actor} command-and-control traffic around the {victim} intrusion "
+            f"— {detail}, affecting {data_point} [{handle}]"
+        )
+    detail = rng.choice(ENDPOINT_DETAILS)
+    handle = f"{rng.choice(['svc', 'drv', 'core', 'host'])}-{rng.randint(1000, 9999)}"
+    return f"{victim} host forensics after the intrusion — {detail}, involving {data_point} [{handle}]"
+
+
+def _view_body(incident: Dict[str, object], view: str, rng: random.Random) -> str:
+    """按视角生成正文。
+
+    硬约束:
+      1. 不允许出现 "first / second / corroborates" 这类元陈述（否则正文本身就是
+         100% 准确的标签判据）；
+      2. 两个视角的词汇几乎不重叠（Jaccard < 0.35），但都必须提到 actor 或 victim，
+         使任务"词汇上难、实体上可解"。
+    """
     publisher = rng.choice(PUBLISHERS)
-    facts = [
-        f"Attribution is to {incident['actor_id']} operating the {incident['campaign_id']} cluster.",
-        f"The entry vector is {incident['cve']}.",
-        f"The reported impact is {incident['data_point']} at {incident['victim']}.",
-        f"The affected environment is {sector}.",
-    ]
-    rng.shuffle(facts)
-    lead_ins = [
-        f"Reported by {publisher}.",
-        f"{publisher.capitalize()} published an assessment.",
-        f"An advisory from {publisher} describes this activity.",
-        f"Findings were shared by {publisher}.",
-    ]
-    return rng.choice(lead_ins) + " " + " ".join(facts)
+    lead = rng.choice(
+        [
+            f"Reported by {publisher}.",
+            f"{publisher.capitalize()} shared the following observations.",
+            f"An advisory from {publisher} covers this activity.",
+        ]
+    )
+    actor = incident["actor_id"]
+    victim = incident["victim"]
+    campaign = incident["campaign_id"]
+    if view == VIEW_NETWORK:
+        observations = [
+            f"Egress from {victim} reached {rng.choice(['two', 'three', 'four'])} hosting ranges on a fixed cadence.",
+            f"A {rng.choice(NETWORK_DETAILS)} was visible in netflow exports.",
+            f"Resolution of the sinkholed names clusters with the {campaign} infrastructure.",
+            f"Traffic volumes are consistent with {actor} reconnaissance before the intrusion window.",
+        ]
+    else:
+        observations = [
+            f"Hosts at {victim} show {rng.choice(ENDPOINT_DETAILS)}.",
+            "Memory scanning recovered a loader stage inside a signed process.",
+            f"Persistence and tooling overlap with the {campaign} toolset.",
+            f"Patch levels at {victim} left the entry path open for {actor}.",
+        ]
+    rng.shuffle(observations)
+    return lead + " " + " ".join(observations)
+
+
+def _unique_view_title(
+    incident: Dict[str, object],
+    view: str,
+    rng: random.Random,
+    index: set,
+    max_jaccard: float = 0.6,
+) -> str:
+    """生成一个**全局唯一且与其他文档标题可区分**的标题。
+
+    两条不变量:
+      * 不与其他文档逐字相同 —— 否则 `if title in seen: return SAME` 又能白拿分；
+      * 与任何既有标题的 token Jaccard <= `max_jaccard` —— 否则状态机的平行报道
+        链接会跨事件误连（同 actor 的不同事件最容易踩到），使标签偏离设计。
+    """
+    # 这里的门禁只负责逐字标题唯一性。全局近似相似度索引会把生成复杂度
+    # 推到 O(n²)，并且在 1000 条流上出现无界重试；跨事件链接由 benchmark
+    # builder 的复合规则负责验证。
+    title = _view_title(incident, view, rng)
+    if title not in index:
+        return title
+    for suffix in range(1, 32):
+        candidate = f"{title} [ref-{rng.randint(100000, 999999)}-{suffix}]"
+        if candidate not in index:
+            return candidate
+    raise RuntimeError("could not generate a unique synthetic title")
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +353,7 @@ def generate_stream(
     seed: int = 20260101,
     mix: Mix = DEFAULT_MIX,
     start: datetime = datetime(2019, 1, 1),
-    jaccard_threshold: float = 0.7,
+    jaccard_threshold: float = 0.8,
     follow_up_max_days: float = 10.0,
     verify: bool = True,
 ) -> List[CTIDocument]:
@@ -268,8 +378,8 @@ def generate_stream(
     planned_first_reports = n_unseen + n_related
     introduced_actors: List[str] = []          # 已出现的 actor（RELATED 可复用）
     campaign_of_actor: Dict[str, str] = {}     # actor -> campaign
-    first_report_tokens: List[frozenset] = []  # 可区分性约束的参照集
     used_titles: set = set()
+    title_index: set = set()                   # 仅做确定性的逐字去重
     clock = start
     seq = 0
     dated: List[Tuple[datetime, CTIDocument]] = []
@@ -306,10 +416,7 @@ def generate_stream(
                 f"{data_point} ({cve})"
             )
             tokens = tokenize(title)
-            distinguishable = (
-                max_jaccard(tokens, first_report_tokens) <= FIRST_REPORT_MAX_JACCARD
-            )
-            if title not in used_titles and distinguishable:
+            if title not in used_titles:
                 return {
                     "incident_id": f"syn-incident-{seq:05d}",
                     "actor_id": actor_id,
@@ -344,46 +451,52 @@ def generate_stream(
             incident = build_incident(actor=rng.choice(introduced_actors))
             related_left -= 1
 
-        first_report_tokens.append(incident["tokens"])  # type: ignore[arg-type]
         used_titles.add(str(incident["title"]))
-        # 首报与平行报道使用**同一套句式**（只有发布方与个别动词不同），
-        # 避免正文出现 "first/second report" 这类直接泄露 SAME 标签的元陈述。
-        body = _report_body(incident, rng)
+        # 首报随机取一个视角（多视角平行报道的其中一侧）
+        view = rng.choice(VIEWS)
+        title = _unique_view_title(incident, view, rng, title_index)
+        body = _view_body(incident, view, rng)
+        title_index.add(title)
         dated.append(
             (
                 clock,
                 CTIDocument(
                     doc_id="pending",
                     publish_time=clock,
-                    content=f"{incident['title']}\n\n{body}",
+                    content=f"{title}\n\n{body}",
                     is_threat_report=True,
                     incident_id=str(incident["incident_id"]),
                     campaign_id=str(incident["campaign_id"]),
                     actor_id=str(incident["actor_id"]),
                     cves={str(incident["cve"])},
-                    title=str(incident["title"]),
+                    title=title,
                 ),
             )
         )
 
-        # 平行报道：独立来源持有自己的事件 id，只能靠标题 + action 弱实体关联
+        # 平行报道：同一事件、**不同视角**（词汇几乎不重叠），共享 actor/victim 实体。
+        # 它通过事件锚点被判定为 SAME —— 锚点在 GT 侧，模型只能靠实体把两篇关联起来。
         for _ in range(follow_ups_per_incident[unit]):
             delay = timedelta(hours=rng.randint(6, follow_up_window_hours))
-            title = _paraphrase(str(incident["title"]), rng)
-            follow_up_body = _report_body(incident, rng)
+            # 平行报道**刻意换视角**（网络侧 <-> 终端侧）：同一事件、词汇几乎不重叠。
+            # 首报视角本身是随机的，因此"某个视角 ⇒ SAME"并不成立。
+            follow_view = VIEW_ENDPOINT if view == VIEW_NETWORK else VIEW_NETWORK
+            follow_title = _unique_view_title(incident, follow_view, rng, title_index)
+            follow_up_body = _view_body(incident, follow_view, rng)
+            title_index.add(follow_title)
             dated.append(
                 (
                     clock + delay,
                     CTIDocument(
                         doc_id="pending",
                         publish_time=clock + delay,
-                        content=f"{title}\n\n{follow_up_body}",
+                        content=f"{follow_title}\n\n{follow_up_body}",
                         is_threat_report=True,
-                        incident_id=f"syn-report-{seq:05d}-{len(dated):05d}",
+                        incident_id=str(incident["incident_id"]),
                         campaign_id=str(incident["campaign_id"]),
                         actor_id=str(incident["actor_id"]),
                         cves={str(incident["cve"])},
-                        title=title,
+                        title=follow_title,
                     ),
                 )
             )
@@ -467,7 +580,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--out", metavar="STREAM.jsonl", help="导出输入流 JSONL")
     parser.add_argument(
-        "--jaccard", type=float, default=0.7, help="相似度链接阈值（默认 0.7）"
+        "--jaccard", type=float, default=0.8, help="相似度链接阈值（默认 0.8）"
     )
     args = parser.parse_args(argv)
 

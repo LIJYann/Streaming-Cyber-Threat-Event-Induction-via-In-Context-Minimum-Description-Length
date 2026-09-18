@@ -787,6 +787,132 @@ _ATTRIBUTE_TYPE_LABELS = {
 }
 _YARA_RULE_RE = re.compile(r"rule\s+([A-Za-z0-9_]+)")
 
+# 平行报道的"改写"词表：只替换通用情报词，不动专有名词（组织/家族/漏洞）
+_HEADLINE_SYNONYMS = [
+    ("analysis", "assessment"),
+    ("analyses", "assessments"),
+    ("blog post", "write-up"),
+    ("report", "write-up"),
+    ("targets", "hits"),
+    ("targeting", "hitting"),
+    ("campaign", "operation"),
+    ("espionage", "intelligence gathering"),
+    ("samples", "specimens"),
+    ("toolkit", "tool set"),
+    ("overview", "rundown"),
+    ("update", "revision"),
+]
+_HEADLINE_PREFIX_RE = re.compile(
+    r"^\s*(osint|misp|flash alert|alert|advisory|ta\d+)\s*[-–—:]\s*", re.I
+)
+_HEADLINE_SOURCE_RE = re.compile(r"\s+(by|from)\s+([A-Z][\w.&]+(?: [A-Z][\w.&]+){0,3})\s*$")
+
+
+def paraphrase_headline(headline: str, variant: int = 0) -> str:
+    """把事件标题改写成**同一事件的另一种说法**（方案 B）。
+
+    为什么需要它：MISP 沿用同一条 event headline，同一事件的所有切片标题逐字相同
+    （实测 112 个多切片事件里 111 个），于是 `if title in seen: return SAME` 一行就能
+    在归属子集上拿到 SAME-F1 0.990 —— 伪任务陷阱。
+
+    但**直接删掉标题**又会走向另一个极端：实测 43.0% 的 SAME 切片正文只剩新生成的
+    哈希，没有任何锚点，任何模型都不可能判断它属于哪起事件（信息论上不可解）。
+
+    所以这里保留标题、只换说法：按切片序号选一种改写变体（截断 / 增删来源署名 /
+    同义词替换），既让"逐字相同"失效，又保住自然语言情报的可解性。
+    """
+    text = (headline or "").strip()
+    if not text:
+        return text
+
+    source = None
+    match = _HEADLINE_SOURCE_RE.search(text)
+    if match:
+        source = match.group(2).strip()
+        text = text[: match.start()].strip(" -–—:")
+    text = _HEADLINE_PREFIX_RE.sub("", text).strip()
+    for original, replacement in _HEADLINE_SYNONYMS:
+        if variant % 2 == 1 and original in text.lower():
+            text = re.sub(re.escape(original), replacement, text, count=1, flags=re.I)
+            break
+
+    # 按 ":" / " - " / "?" 切出可独立成句的片段，供不同变体挑选
+    clauses = [part.strip(" .-–—") for part in re.split(r"\s*[:?]\s*|\s+-\s+", text) if part.strip()]
+    head = clauses[0] if clauses else text
+    tail = clauses[-1] if len(clauses) > 1 else ""
+
+    option = variant % 4
+    if option == 0:
+        return f"{head}" + (f" ({source})" if source else "")
+    if option == 1:
+        return (f"{source}: {text}" if source else text)
+    if option == 2:
+        return f"{head}" + (f" — {tail}" if tail else "")
+    return f"{tail or head}" + (f" (reporting by {source})" if source else "")
+
+
+_GROUP_DESCRIPTOR = {
+    "Payload delivery": "file artefacts",
+    "Sample hashes": "sample hashes",
+    "Network activity": "C2 infrastructure",
+    "Vulnerability": "vulnerability details",
+    "Detection": "detection rules",
+    "Attribution": "attribution",
+    "Other": "references",
+}
+
+
+def evidence_descriptor(attributes: Sequence[Dict[str, Any]]) -> str:
+    """用**该切片自身的属性构成**给标题加一段客观描述（如 "12 records: sample hashes, C2 infrastructure"）。
+
+    两个作用:
+      1. 让同一事件不同切片的标题天然互不相同（避免 paraphrase 变体重合导致逐字相同）；
+      2. 提升人类/模型可读性 —— 标题直接说明这批情报是什么类型。
+    描述只由本切片的证据构成，不含批次序号、不含"新增/更新"等元陈述。
+    """
+    groups: List[str] = []
+    for attribute in attributes:
+        attribute_type = str(attribute.get("type") or "?")
+        if attribute_type in _PROSE_TYPES:
+            group = "Analyst notes"
+        else:
+            for name, types in _INDICATOR_GROUPS:
+                if attribute_type in types:
+                    group = name
+                    break
+            else:
+                group = "Other"
+        label = _GROUP_DESCRIPTOR.get(group, group.lower())
+        if label not in groups:
+            groups.append(label)
+    if not groups:
+        return ""
+    # 刻意**不写记录条数**：条数会与"这是第几批到达"相关（增量批次通常更小），
+    # 写进标题等于给出一个与任务无关的规模线索。
+    return " and ".join(groups[:3])
+
+
+def _slice_title(
+    headline: str,
+    index: int,
+    batch: Sequence[Dict[str, Any]],
+    used: Optional[Set[str]] = None,
+) -> str:
+    """切片标题 = 同事件的改写标题 + 本切片证据构成，并保证同事件内不重复。
+
+    "同事件内标题不重复"是硬要求：只要有两个切片标题逐字相同，
+    `if title in seen: return SAME` 就能白拿那部分样本（伪任务陷阱）。
+    因此这里先试不同改写变体，仍冲突才退回带条数的形式。
+    """
+    descriptor = evidence_descriptor(batch)
+    for extra in range(4):
+        base = paraphrase_headline(headline, index + extra)
+        candidate = f"{base} — {descriptor}" if (base and descriptor) else (base or descriptor)
+        if not used or candidate not in used:
+            return candidate
+    base = paraphrase_headline(headline, index)
+    return f"{base} — {len(batch)} records"
+
 
 def _pluralise(attribute_type: str, count: int) -> str:
     label = _ATTRIBUTE_TYPE_LABELS.get(attribute_type, attribute_type)
@@ -946,6 +1072,7 @@ def load_misp_event_slices(
             sessions = [(event_ts, event_ts)]
         slice_times = [session[0] for session in sessions]
 
+        used_titles: Set[str] = set()
         for index, (session, moment_ts) in enumerate(zip(sessions, slice_times)):
             start_ts, end_ts = session
             moment = datetime.fromtimestamp(moment_ts, timezone.utc)
@@ -989,9 +1116,12 @@ def load_misp_event_slices(
                     campaign_id=campaign_id,
                     actor_id=actor_id,
                     cves=slice_cves,
-                    title=info,
+                    # 方案 B: 每个切片用同一事件标题的一种改写，避免"逐字相同"捷径，
+                    # 同时保留自然语言锚点（否则切片会变成不可解的纯哈希天书）。
+                    title=_slice_title(info, index, batch, used_titles),
                 )
             )
+            used_titles.add(documents[-1].title or "")
     return documents
 
 

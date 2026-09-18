@@ -15,6 +15,13 @@ python3 scripts/build_all.py freeze  # 写入 data/FROZEN.sha256 指纹锁（数
 python3 scripts/build_all.py check   # 离线重算 + 逐字节比对已提交产物
 python3 scripts/build_all.py all     # 上面三步
 
+# 统一在线评测：预热窗只更新记忆，不计入指标
+python3 scripts/evaluate.py \
+  --stream data/model_input/misp_sliced_input_notitle.jsonl \
+  --benchmark data/misp_sliced_benchmark.jsonl \
+  --warmup 200 --baseline title_jaccard \
+  --metrics macro_f1,b_cubed,ari
+
 python3 -m pytest tests -q           # 60 passed
 ```
 
@@ -50,7 +57,7 @@ python3 -m pytest tests -q           # 60 passed
 | `content` 长度 | 中位数 290 / p95 763 / 最大 1195 字符 |
 | 正文含示例值 / 分析师批注 | 91.3% / 32.9% |
 | YARA 规则体倾倒 | 0（只保留规则名） |
-| 合成流首报 vs 平行报道 | 同构模板 + 随机发布方/事实顺序，无 "first/second report" 元陈述 |
+| 合成流首报 vs 平行报道 | 网络流量侧 vs 终端取证侧的多视角报告；共享事件实体但不使用 first/second report 元陈述 |
 
 残留的类别相关性只有**数据固有一项**：`SAME` 切片正文更短（中位 166 vs `UNSEEN` 411），
 因为增量证据本来就少。建议论文里显式披露或做长度归一化对照。
@@ -70,7 +77,7 @@ python3 -m pytest tests -q           # 60 passed
 | Real-Augmented-Attributed 712 | 带标题 | **0.990** ← 伪任务风险 | 0.717 | 0.436 |
 | Real-Augmented 2082 | **无标题** | — | **0.046** | 0.210 |
 | Real-Augmented-Attributed 712 | **无标题** | — | **0.037** | 0.169 |
-| Controlled-Synthetic 1000 | 带/无标题 | 0.000 | 0.817 / 0.879 | 0.345 / 0.347 |
+| Controlled-Synthetic 1000 | 带/无标题 | 0.000 | 受控多视角（不作为真实流捷径结论） | — |
 
 结论与使用协议：
 
@@ -81,12 +88,31 @@ python3 -m pytest tests -q           # 60 passed
    等证据判断。带标题口径（0.990）只用于"用了捷径能到多少"的对照。
 3. **正文不再重复标题**：切片正文只承载证据（指标与批注），标题单独放在 `title` 字段，
    两个口径因此可以干净地切换。
-4. 合成流的 `SAME` 是**改写级平行报道**，因此文本相似度基线自然偏高（0.88）——这是该资产
-   的设计（测改写识别），不要用它论证"模型会做事件归纳"。
+4. 合成流的 `SAME` 采用网络流量侧与终端取证侧的多视角报告，刻意降低词汇重合；它用于
+   受控消歧，不应替代真实流上的开放世界结论。合成报告显式携带事件锚点以保证生成标签可复现，
+   因此关闭 similarity-link 不会改变其标签分布。
+
+统一评测入口 `scripts/evaluate.py` 从第一个文档开始更新状态，但通过 `--warmup` 排除冷启动窗的
+   指标；除 4-way Macro-F1 外，还输出 B-cubed F1 与 ARI。预测文件每行使用
+   `{"id": "...", "label": "...", "target": "..."}`，`target` 指向被合并的较早文档。
 
 这三条已固化为 `tests/test_baselines.py`：既断言"没有规则能刷满 4-way"，也断言
 "无标题后捷径确实失效"，同时把 attributed 子集的 0.990 保留为**显式已知属性**，
 防止有人在不知情的情况下用它宣称 SAME 召回率。
+
+## 流式评测协议与可解性审计
+
+正式评测从固定的 warm-up 窗口之后开始；例如 200 表示前 200 篇只用于建立状态，不计入分数。统一入口为：
+
+```bash
+python scripts/evaluate.py \
+  --stream data/model_input/misp_sliced_input_notitle.jsonl \
+  --benchmark data/misp_sliced_benchmark.jsonl \
+  --warmup 200 --metrics macro_f1,b_cubed,ari
+```
+
+除了四分类 Macro-F1，还报告最终事件簇的 B-cubed F1 与 ARI；`NO_EVENT` 文档不进入预测事件簇。
+可解性审计由 `scripts/solvability_audit.py` 生成。当前 `Real-Augmented/notitle` 中无锚点比例为：SAME 43.0%、RELATED 16.6%；因此论文不能宣称去标题后所有样本都具备充分语义证据，应将该比例作为真实数据限制公开报告。Controlled-Synthetic 采用网络流量侧与终端取证侧多视角文本，保留 actor/victim 等共享实体用于受控消歧。
 
 ## 四个评测资产
 
