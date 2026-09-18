@@ -7,30 +7,7 @@
       "n_documents": 2082,
       "warmup": 200,
       "n_scored": 1882,
-      "predictor": "tmp5nm9z5fr.jsonl",
-      "macro_f1": 0.1629,
-      "accuracy": 0.152,
-      "per_class_f1": {
-        "NO_EVENT": 0.0896,
-        "SAME_EVENT": 0.1705,
-        "RELATED_EVENT": 0.2532,
-        "UNSEEN_EVENT": 0.1382
-      },
-      "b_cubed_precision": 0.431,
-      "b_cubed_recall": 0.8371,
-      "b_cubed_f1": 0.569,
-      "ari": 0.0019,
-      "n_gold_clusters": 558,
-      "n_pred_clusters": 296,
-      "same_threshold": 0.05
-    },
-    {
-      "stream": "misp_sliced_input_notitle.jsonl",
-      "benchmark": "misp_sliced_benchmark.jsonl",
-      "n_documents": 2082,
-      "warmup": 200,
-      "n_scored": 1882,
-      "predictor": "tmpgc3croj9.jsonl",
+      "predictor": "fixed_trace_mdl",
       "macro_f1": 0.1629,
       "accuracy": 0.152,
       "per_class_f1": {
@@ -53,7 +30,7 @@
       "n_documents": 2082,
       "warmup": 200,
       "n_scored": 1882,
-      "predictor": "tmpmzeh_yg6.jsonl",
+      "predictor": "fixed_trace_mdl",
       "macro_f1": 0.1687,
       "accuracy": 0.1578,
       "per_class_f1": {
